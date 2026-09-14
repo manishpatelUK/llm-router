@@ -12,6 +12,7 @@ import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.manishpateluk.llmrouter.provider.Provider;
 
 import lombok.Builder;
 import lombok.Value;
@@ -57,26 +58,41 @@ public final class ModelCapabilityTable {
     /**
      * Returns every model currently registered for a single provider.
      *
-     * @param provider canonical provider id (see {@code LIBRARY_SPEC.md} §12.1), matched exactly
-     *                  (case-sensitive)
      * @return an immutable snapshot, possibly empty; never {@code null}
      */
-    public static List<ModelEntry> listModels(String provider) {
+    public static List<ModelEntry> listModels(Provider provider) {
         Objects.requireNonNull(provider, "provider must not be null");
         return MODELS.stream()
-                .filter(entry -> entry.getProvider().equals(provider))
+                .filter(entry -> entry.getProvider() == provider)
                 .collect(Collectors.toUnmodifiableList());
+    }
+
+    /**
+     * Convenience overload taking a canonical provider id string (see {@code LIBRARY_SPEC.md}
+     * §12.1) instead of a {@link Provider}.
+     *
+     * @throws IllegalArgumentException if {@code providerId} isn't a canonical provider id
+     */
+    public static List<ModelEntry> listModels(String providerId) {
+        Objects.requireNonNull(providerId, "providerId must not be null");
+        return listModels(Provider.fromId(providerId));
     }
 
     /**
      * Looks up a single model by its {@code provider}+{@code model} primary key.
      */
-    public static Optional<ModelEntry> findModel(String provider, String model) {
+    public static Optional<ModelEntry> findModel(Provider provider, String model) {
         Objects.requireNonNull(provider, "provider must not be null");
         Objects.requireNonNull(model, "model must not be null");
         return MODELS.stream()
                 .filter(entry -> matches(entry, provider, model))
                 .findFirst();
+    }
+
+    /** Convenience overload taking a canonical provider id string. */
+    public static Optional<ModelEntry> findModel(String providerId, String model) {
+        Objects.requireNonNull(providerId, "providerId must not be null");
+        return findModel(Provider.fromId(providerId), model);
     }
 
     /**
@@ -96,12 +112,18 @@ public final class ModelCapabilityTable {
      *
      * @return {@code true} if a matching entry was removed, {@code false} if none existed
      */
-    public static boolean removeModel(String provider, String model) {
+    public static boolean removeModel(Provider provider, String model) {
         Objects.requireNonNull(provider, "provider must not be null");
         Objects.requireNonNull(model, "model must not be null");
         synchronized (WRITE_LOCK) {
             return MODELS.removeIf(existing -> matches(existing, provider, model));
         }
+    }
+
+    /** Convenience overload taking a canonical provider id string. */
+    public static boolean removeModel(String providerId, String model) {
+        Objects.requireNonNull(providerId, "providerId must not be null");
+        return removeModel(Provider.fromId(providerId), model);
     }
 
     /**
@@ -111,8 +133,8 @@ public final class ModelCapabilityTable {
         return MODELS.size();
     }
 
-    private static boolean matches(ModelEntry entry, String provider, String model) {
-        return entry.getProvider().equals(provider) && entry.getModel().equals(model);
+    private static boolean matches(ModelEntry entry, Provider provider, String model) {
+        return entry.getProvider() == provider && entry.getModel().equals(model);
     }
 
     private static List<ModelEntry> loadSeedModels() {

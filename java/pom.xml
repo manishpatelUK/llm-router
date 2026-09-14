@@ -5,13 +5,37 @@
                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.manishpateluk</groupId>
+  <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
   <version>1.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
   <name>LLM Router</name>
-  <description>A Java library for routing LLM requests</description>
+  <description>A Java library for routing LLM requests across multiple providers with automatic fallback, capability-aware adaptation, and cost optimization.</description>
+  <url>https://github.com/manishpatelUK/llm-router</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://github.com/manishpatelUK/llm-router/blob/main/LICENSE</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>manishpatelUK</id>
+      <name>Manish Patel</name>
+      <url>https://github.com/manishpatelUK</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/manishpatelUK/llm-router.git</connection>
+    <developerConnection>scm:git:https://github.com/manishpatelUK/llm-router.git</developerConnection>
+    <url>https://github.com/manishpatelUK/llm-router</url>
+    <tag>HEAD</tag>
+  </scm>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -21,6 +45,10 @@
     <jackson.version>2.18.2</jackson.version>
     <junit.version>5.11.4</junit.version>
     <assertj.version>3.26.3</assertj.version>
+    <anthropic.version>2.62.0</anthropic.version>
+    <openai.version>4.63.1</openai.version>
+    <slf4j.version>2.0.16</slf4j.version>
+    <mockito.version>5.18.0</mockito.version>
     <!-- Single source of truth lives at the repo root, one level above this module;
          copied into target/classes at build time instead of being checked in here. -->
     <model-capability-table.dir>${project.basedir}/..</model-capability-table.dir>
@@ -46,6 +74,22 @@
     </dependency>
 
     <dependency>
+      <groupId>com.anthropic</groupId>
+      <artifactId>anthropic-java</artifactId>
+      <version>${anthropic.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.openai</groupId>
+      <artifactId>openai-java</artifactId>
+      <version>${openai.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <version>${junit.version}</version>
@@ -55,6 +99,26 @@
       <groupId>org.assertj</groupId>
       <artifactId>assertj-core</artifactId>
       <version>${assertj.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <!-- Forces a JDK 25-aware Byte Buddy: assertj-core's own transitive 1.14.18 is
+           otherwise nearer in the dependency tree and wins mediation over Mockito's. -->
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy</artifactId>
+      <version>1.17.5</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>${mockito.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
+      <version>${mockito.version}</version>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -82,6 +146,11 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.2</version>
+        <configuration>
+          <!-- Mockito's inline mock maker self-attaches as a Java agent at runtime; this
+               keeps that working past the JDK's dynamic-agent-loading warning/future lockdown. -->
+          <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+        </configuration>
       </plugin>
       <plugin>
         <!-- Copies model-capability-table.json from the repo root into target/classes
@@ -112,4 +181,77 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <!-- Everything needed to publish to Maven Central, kept out of the default build so
+           `mvn test`/`mvn package` stay fast and don't require a GPG key on every machine.
+           Activate with `mvn clean deploy -Prelease` — see java/pom.xml's neighboring README
+           for the one-time account/namespace/GPG setup this depends on. -->
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.11.2</version>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <!-- Central requires every published artifact to be PGP-signed. Relies on gpg-agent
+                 (or an equivalent pinentry setup) to prompt for the passphrase interactively;
+                 never put a signing passphrase in this file or in settings.xml in plaintext. -->
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.7</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <!-- Uploads the signed bundle to the Central Publishing Portal. publishingServerId
+                 must match a <server> entry in ~/.m2/settings.xml holding your Central user
+                 token (Account -> Generate User Token on central.sonatype.com) — never commit
+                 that token to this repo. autoPublish is deliberately left at its default
+                 (false): the deployment lands in the Portal for you to review and publish
+                 manually the first few times; flip it to true here once you're comfortable
+                 fully automating releases. -->
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

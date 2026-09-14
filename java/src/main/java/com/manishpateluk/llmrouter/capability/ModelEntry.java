@@ -2,6 +2,8 @@ package com.manishpateluk.llmrouter.capability;
 
 import java.time.Instant;
 
+import com.manishpateluk.llmrouter.provider.Provider;
+
 import lombok.Builder;
 import lombok.Value;
 import lombok.extern.jackson.Jacksonized;
@@ -19,8 +21,8 @@ import lombok.extern.jackson.Jacksonized;
 @Jacksonized
 public class ModelEntry {
 
-    /** Canonical provider id, e.g. {@code "anthropic"} — see {@code LIBRARY_SPEC.md} §12.1. */
-    String provider;
+    /** Canonical provider id — see {@code LIBRARY_SPEC.md} §12.1. */
+    Provider provider;
 
     /** Provider-defined model id, e.g. {@code "claude-opus-5"} — not a library-level enum. */
     String model;
@@ -40,6 +42,12 @@ public class ModelEntry {
     boolean supportsStructuredOutput;
     boolean supportsTools;
     boolean supportsVision;
+
+    /** Can accept non-image file attachments (documents, etc.) in a request — see §4. */
+    boolean supportsFileInput;
+
+    /** Can produce downloadable generated files, e.g. via code execution or image generation — see §4. */
+    boolean supportsFileOutput;
 
     /** UTC timestamp of when this specific row was last verified/updated. */
     Instant lastUpdated;

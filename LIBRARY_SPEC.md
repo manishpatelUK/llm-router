@@ -39,6 +39,7 @@ Request {
   systemInstructions: string?          // optional system/developer prompt
   responseSchema: Schema?              // optional structured-output schema (JSON-Schema-like)
   tools: ToolDefinition[]?             // optional tool/function definitions the model may call
+  attachments: Attachment[]?           // optional files to include with the prompt (documents, images, etc.)
   config: RouterConfig?                // optional; falls back to the router's default config if omitted
 }
 
@@ -46,6 +47,14 @@ ToolDefinition {
   name: string
   description: string
   parameters: Schema                   // JSON-Schema-like description of arguments
+}
+
+Attachment {
+  mediaType: string                    // MIME type, e.g. "application/pdf", "image/png"
+  data: bytes                          // raw file content — each language uses its own idiomatic binary type
+                                        // (e.g. byte[] in Java); base64 is purely a wire-format detail internal
+                                        // to each provider adapter, never part of this struct
+  filename: string?                    // optional display name
 }
 ```
 
@@ -70,6 +79,7 @@ Response {
   }
   droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
   attempts: AttemptRecord[]            // one entry per candidate tried before success (empty if first candidate succeeded)
+  generatedFiles: GeneratedFile[]?     // files the model produced (e.g. via code execution or image generation), if any
   original: {}                         // the raw original output from the provide, for convenience
 }
 
@@ -78,6 +88,14 @@ AttemptRecord {
   model: string
   outcome: "success" | "failed" | "skipped"   // §12.6
   reason: string?                      // error message or skip reason (e.g. "no API key detected")
+}
+
+GeneratedFile {
+  mediaType: string
+  filename: string?
+  data: bytes?                         // raw file content, when the provider returns it inline
+  url: string?                         // temporary download URL, when the provider returns a reference instead
+                                        // of inline bytes — exactly one of data/url is populated
 }
 ```
 
@@ -92,10 +110,13 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 | `responseSchema` | Sent natively via provider's structured-output mechanism | Dropped by default (`droppedFeatures` records it). Optionally, implementations may offer a `structuredOutputStrategy` on `RouterConfig`: `"native"` (fail/drop if unsupported), `"promptFallback"` (inject schema + "respond with JSON only" instructions into the system prompt and best-effort parse the result), or `"auto"` (native when available, prompt-fallback otherwise). Default is `"auto"`. |
 | `tools` | Sent natively via provider's tool-calling mechanism | Dropped, recorded in `droppedFeatures`. No prompt-based faking of tool calls — this is unreliable enough that dropping is the safe default. |
 | `history` | Mapped to provider's message format | N/A — all supported providers accept multi-turn history |
+| `attachments` | Sent natively via the provider's image/document input mechanism. Each attachment's `mediaType` is checked individually: `image/*` against `ModelEntry.supportsVision`, everything else against `ModelEntry.supportsFileInput`. | If **any** attachment in the request can't be supported by the chosen model, the whole `attachments` request is dropped (not sent) and recorded once in `droppedFeatures` — matching this table's existing feature-level (not per-item) granularity. |
+
+Separately, `Response.generatedFiles` is only ever populated when `ModelEntry.supportsFileOutput` is true for the model that served the request — this isn't something a caller requests per-call (there's no matching `Request` field), it's a property of whether the chosen model/provider combination can produce downloadable files at all (e.g. via a code-execution or image-generation tool).
 
 This negotiation happens **per attempt**, not once — if the router falls back from a model that supports structured output to one that doesn't, the second attempt correctly drops it and reports that in `droppedFeatures`/`attempts`.
 
-`droppedFeatures` entries must use the exact canonical values in §12.7 (`"responseSchema"`, `"tools"`) — not a paraphrase or a differently-cased variant — so calling code can reliably branch on them regardless of which language implementation produced the response.
+`droppedFeatures` entries must use the exact canonical values in §12.7 (`"responseSchema"`, `"tools"`, `"attachments"`) — not a paraphrase or a differently-cased variant — so calling code can reliably branch on them regardless of which language implementation produced the response.
 
 ---
 
@@ -193,6 +214,8 @@ ModelEntry {
   supportsStructuredOutput: boolean
   supportsTools: boolean
   supportsVision: boolean
+  supportsFileInput: boolean    // can accept non-image file attachments (documents, etc.) in a request — §4
+  supportsFileOutput: boolean   // can produce downloadable generated files, e.g. via code execution or image generation — §4
   lastUpdated: string          // ISO 8601 UTC timestamp, e.g. "2026-09-14T13:09:08Z" — when this specific row was last verified/updated
 }
 ```
@@ -337,7 +360,7 @@ Adding a 6th+ provider later should follow the same convention (lowercase, singl
 
 ### 12.7 `droppedFeatures` entries
 
-Exactly the two request-field names they refer to: `responseSchema` | `tools` (matching the field names in §3's `Request` shape, camelCase, no other spellings).
+Exactly the request-field names they refer to: `responseSchema` | `tools` | `attachments` (matching the field names in §3's `Request` shape, camelCase, no other spellings).
 
 ### 12.8 Canonical error codes
 

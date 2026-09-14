@@ -71,13 +71,15 @@ Pull directly from the provider's docs when published. **When max output tokens 
 
 Mark any estimated (non-sourced) field for follow-up the next time the table is refreshed — the skill's report step (see the SKILL.md) should call these out explicitly rather than silently presenting them as sourced.
 
-## Capability flags (`supportsStructuredOutput`, `supportsTools`, `supportsVision`)
+## Capability flags (`supportsStructuredOutput`, `supportsTools`, `supportsVision`, `supportsFileInput`, `supportsFileOutput`)
 
 Check the provider's own feature/model-comparison page or API reference; these are usually stated plainly (a feature support matrix or a per-model "capabilities" list). Rules of thumb when a specific model isn't individually documented but its provider's *platform* feature is:
 
 - If the provider's tool-calling / structured-output feature is documented as available "for all current models" or similar blanket statement, apply `true` to every current-generation model from that provider, `false` for explicitly legacy/deprecated ones.
 - Very small (roughly <5B parameter) open-weight models frequently have unreliable or unsupported tool-calling and JSON-schema-constrained decoding even when the hosting platform technically exposes the parameter — default these to `false` unless the model card explicitly claims support.
 - Text-only model families (no documented image input) get `supportsVision: false` even if a same-family vision variant exists under a different model ID — score the exact model ID, not the family.
+- `supportsFileInput` (non-image document attachments, e.g. PDF): `true` only if the provider documents a general document/file-upload input mechanism for that model (not just images) — e.g. a Files API or inline-document content-block type. A provider whose API is purely OpenAI-compatible chat-completions with no documented document-upload path gets `false` even if the underlying model could theoretically handle document text pasted inline, since that's not a distinct request-level capability this flag is meant to track.
+- `supportsFileOutput`: `true` only if the provider documents a mechanism for the model to *produce* a downloadable file as part of a response (e.g. a code-execution tool with file output, or a dedicated image-generation tool) — not just text/JSON output. Most chat-completions-only providers (no code-execution or file-generation tool in their API) get `false`.
 
 ## Worked example
 
