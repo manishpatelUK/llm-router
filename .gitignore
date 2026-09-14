@@ -1,0 +1,50 @@
+# IDE and Editor Files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.#*
+*.iml
+*.iws
+*.ipr
+.vs/
+.fleet/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+*.playground
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# OS-specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.directory
+
+# Environment and local configuration
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+.tmp/
+*.tmp
+temp/
+.cache/
+
+# General build/distribution (for language-specific folders to override)
+# Language-specific gitignores in subdirectories will be more precise
