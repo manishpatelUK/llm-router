@@ -35,7 +35,7 @@ Every call ultimately builds one **Request** object. Language implementations sh
 ```
 Request {
   prompt: string                       // required — the latest user message
-  history: Message[]?                  // optional prior turns: { role: "user"|"assistant"|"system"|"tool", content }
+  history: Message[]?                  // optional prior turns: { role: "user"|"assistant"|"system"|"tool", content } — role values per §12.5
   systemInstructions: string?          // optional system/developer prompt
   responseSchema: Schema?              // optional structured-output schema (JSON-Schema-like)
   tools: ToolDefinition[]?             // optional tool/function definitions the model may call
@@ -53,26 +53,30 @@ The router does **not** execute tool calls itself — it only requests them from
 
 ### Response shape
 
+Implementations should try and fill in as much of the shape as possible, and omit if not possible.
+
 ```
 Response {
   content: string                      // primary text output
   structuredOutput: object?            // present if a responseSchema was honored natively or via fallback
   toolCalls: ToolCall[]?               // present if the model requested tool invocations
-  providerUsed: string                 // e.g. "anthropic"
-  modelUsed: string                    // e.g. "claude-opus-5"
+  providerUsed: string                 // canonical provider ID, §12.1 (e.g. "anthropic")
+  modelUsed: string                    // provider-defined model id, §12.2 (e.g. "claude-opus-5")
   usage: {
     inputTokens: int
     outputTokens: int
-    estimatedCostUsd: float
+    reasoningTokens: int
+    estimatedCostUsd: int              // converted to cents to avoid floating point issues
   }
-  droppedFeatures: string[]            // e.g. ["responseSchema", "tools"] if the chosen model couldn't support them
+  droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
   attempts: AttemptRecord[]            // one entry per candidate tried before success (empty if first candidate succeeded)
+  original: {}                         // the raw original output from the provide, for convenience
 }
 
 AttemptRecord {
-  provider: string
+  provider: string                     // canonical provider ID, §12.1
   model: string
-  outcome: "success" | "failed" | "skipped"
+  outcome: "success" | "failed" | "skipped"   // §12.6
   reason: string?                      // error message or skip reason (e.g. "no API key detected")
 }
 ```
@@ -90,6 +94,8 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 | `history` | Mapped to provider's message format | N/A — all supported providers accept multi-turn history |
 
 This negotiation happens **per attempt**, not once — if the router falls back from a model that supports structured output to one that doesn't, the second attempt correctly drops it and reports that in `droppedFeatures`/`attempts`.
+
+`droppedFeatures` entries must use the exact canonical values in §12.7 (`"responseSchema"`, `"tools"`) — not a paraphrase or a differently-cased variant — so calling code can reliably branch on them regardless of which language implementation produced the response.
 
 ---
 
@@ -109,6 +115,8 @@ RouteEntry =
     { provider: string, model: string }   // fully specified — this exact model is tried
   | { provider: string }                  // provider only — resolved to a model at call time via thinkingLevel (§7.2)
 ```
+
+`provider` above must be one of the canonical provider IDs (§12.1). `thinkingLevel` and `structuredOutputStrategy` must be one of the exact literal values given here — see §12.3 and §12.4 for the consolidated, cross-language reference.
 
 ### 5.1 Routing & fallback
 
@@ -140,27 +148,29 @@ Credential detection happens **once**, lazily, on first use of the router in the
 
 For each supported provider, the router checks a library-namespaced variable first, then falls back to that provider's common convention variable, so the library plays nicely alongside other tools that already expect the common name:
 
-| Provider | Primary env var | Fallback env var |
-|---|---|---|
-| Anthropic (Claude) | `LLM_ROUTER_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
-| OpenAI | `LLM_ROUTER_OPENAI_API_KEY` | `OPENAI_API_KEY` |
-| Perplexity | `LLM_ROUTER_PERPLEXITY_API_KEY` | `PERPLEXITY_API_KEY` |
-| NVIDIA (NIM) | `LLM_ROUTER_NVIDIA_API_KEY` | `NVIDIA_API_KEY` |
-| Hugging Face | `LLM_ROUTER_HUGGINGFACE_API_KEY` | `HF_TOKEN`, then `HUGGINGFACE_API_KEY` |
+| Provider ID (§12.1) | Display name | Primary env var | Fallback env var |
+|---|---|---|---|
+| `anthropic` | Anthropic (Claude) | `LLM_ROUTER_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
+| `openai` | OpenAI | `LLM_ROUTER_OPENAI_API_KEY` | `OPENAI_API_KEY` |
+| `perplexity` | Perplexity | `LLM_ROUTER_PERPLEXITY_API_KEY` | `PERPLEXITY_API_KEY` |
+| `nvidia` | NVIDIA (NIM) | `LLM_ROUTER_NVIDIA_API_KEY` | `NVIDIA_API_KEY` |
+| `huggingface` | Hugging Face | `LLM_ROUTER_HUGGINGFACE_API_KEY` | `HF_TOKEN`, then `HUGGINGFACE_API_KEY` |
+| `openrouter` | OpenRouter | `LLM_ROUTER_OPENROUTER_API_KEY` | `OPENROUTER_API_KEY` |
 
-A provider is considered "available" if either variable resolves to a non-empty value.
+A provider is considered "available" if either variable resolves to a non-empty value. The left column (`Provider ID`) is the exact, case-sensitive string every implementation must use wherever a `provider` field appears (`RouteEntry.provider`, `ModelEntry.provider`, `ProviderAdapter.id`, `Response.providerUsed`, `AttemptRecord.provider`) — see §12.1 for the authoritative list.
 
 ### 6.2 Default provider preference order
 
 Used to build the default route (§5.2) once filtered to available providers:
 
-1. Anthropic (Claude)
-2. OpenAI
-3. Perplexity
-4. NVIDIA
-5. Hugging Face
+1. `anthropic`
+2. `openai`
+3. `perplexity`
+4. `nvidia`
+5. `huggingface`
+6. `openrouter`
 
-This order is a reasonable general-purpose default (frontier general-purpose models first, specialized/search-oriented and open-model providers after) and should be easy for a caller to override entirely via `RouterConfig.route`.
+This order is a reasonable general-purpose default (frontier general-purpose models first, specialized/search-oriented and open-model providers after, with the multi-vendor aggregator `openrouter` last since it overlaps the others and is most useful as a broad catch-all) and should be easy for a caller to override entirely via `RouterConfig.route`.
 
 ---
 
@@ -172,8 +182,8 @@ The router ships with a built-in table describing every model it knows about acr
 
 ```
 ModelEntry {
-  provider: string
-  model: string
+  provider: string              // canonical provider ID, §12.1
+  model: string                 // provider-defined model id, §12.2 — not a library-level enum
   inputCostPerMillionTokens: float
   outputCostPerMillionTokens: float
   thinkingScore: number        // 0-10, relative reasoning/capability strength within this table
@@ -183,12 +193,13 @@ ModelEntry {
   supportsStructuredOutput: boolean
   supportsTools: boolean
   supportsVision: boolean
+  lastUpdated: string          // ISO 8601 UTC timestamp, e.g. "2026-09-14T13:09:08Z" — when this specific row was last verified/updated
 }
 ```
 
 Library API surface for the table (name per language convention): `registerModel(entry)`, `updateModel(provider, model, partialFields)`, `removeModel(provider, model)`, `listModels(provider?)`. Updates take effect immediately for subsequent calls; no restart required.
 
-The library should ship with a reasonable seed table covering current flagship, mid, and lightweight models from each of the providers in §8, populated with approximate real-world pricing and relative capability/speed scores at time of writing. Treat these seed values as "best effort, expected to go stale" — this is exactly why the table is user-updatable.
+The library should ship with a reasonable seed table covering current flagship, mid, and lightweight models from each of the providers in §8, populated with approximate real-world pricing and relative capability/speed scores at time of writing. Treat these seed values as "best effort, expected to go stale" — this is exactly why the table is user-updatable. The pre-built table will be provided in the root folder of this project (alongside this file) along with a skill to keep it updated.
 
 ### 7.2 Thinking-level → model selection heuristic
 
@@ -210,7 +221,7 @@ Algorithm:
 4. Select the model(s) whose `thinkingScore` is closest to the target score.
 5. Break ties, in order: (a) higher `speedScore`, (b) lower combined input+output cost, (c) alphabetical `model` id — so selection is deterministic.
 
-For cost-optimized expansion (§5.3), instead of collapsing to a single closest match in step 4, take **all models within a small tolerance band** of the target score (e.g. within 1.0 `thinkingScore` point, or the single closest if none fall within the band) as the "qualifying set," then sort that set ascending by estimated cost for the actual prompt.
+For cost-optimized expansion (§5.3), instead of collapsing to a single closest match in step 4, take **all models within a 1 point thinkingScore tolerance band** of the target score as the "qualifying set", then sort that set ascending by estimated cost for the actual prompt.
 
 ---
 
@@ -218,11 +229,16 @@ For cost-optimized expansion (§5.3), instead of collapsing to a single closest 
 
 The library must ship with built-in provider adapters for, at minimum:
 
-1. **OpenAI**
-2. **Anthropic (Claude)**
-3. **Perplexity**
-4. **NVIDIA** (NIM-hosted open models)
-5. **Hugging Face** (Inference API / Inference Endpoints)
+1. **OpenAI** — `openai`
+2. **Anthropic (Claude)** — `anthropic`
+3. **Perplexity** — `perplexity`
+4. **NVIDIA** (NIM-hosted open models) — `nvidia`
+5. **Hugging Face** (Inference API / Inference Endpoints) — `huggingface`
+6. **OpenRouter** (multi-vendor model aggregator/router) — `openrouter`
+
+(Canonical provider ID strings per §12.1.)
+
+OpenRouter is itself a router over many upstream vendors' models, addressed by OpenRouter-specific model id strings (typically `vendor/model-name`, e.g. `"anthropic/claude-opus-5"`) — see §12.2. Its Model Capability Table entries (§7) should be populated the same way as any other provider's, and it participates in fallback/cost-optimized ordering identically to the other five; the library does not treat it specially beyond that.
 
 ### 8.1 Provider adapter contract (conceptual)
 
@@ -230,7 +246,7 @@ Each provider is implemented behind a common internal adapter interface so addit
 
 ```
 ProviderAdapter {
-  id: string                                   // e.g. "anthropic"
+  id: string                                   // one of the canonical provider IDs, §12.1 (e.g. "anthropic")
   isAvailable(): boolean                       // credential check, §6
   send(model: string, adaptedRequest): RawResponse   // provider-specific call
   normalize(rawResponse): Response fragments   // maps provider response → unified Response shape
@@ -275,3 +291,60 @@ No logging is mandatory-on by default beyond what the host application's logging
 - Packaging/distribution mechanics (Maven Central, npm, PyPI, NuGet, crates.io, etc.).
 - Tool-call *execution* — the library only surfaces requested tool calls; invoking them is the host application's responsibility.
 - Retry/backoff timing policy for transient provider errors within a single attempt — implementations may add a small, sensible retry (e.g. one retry on 429/5xx) before treating a candidate as failed, but this is an implementation detail, not a contract.
+
+---
+
+## 12. Canonical Enum & Identifier Values (Cross-Language Contract)
+
+Every language implementation of `llm-router` MUST use the exact, case-sensitive string literals below wherever this spec calls for an enum-like value. This is what keeps a `RouterConfig`, a `Response`, or a config file written against one language's implementation directly portable to another (e.g. a JSON-serialized route or a saved capability table should mean the same thing whether produced by the Java or the Python port). Do not translate, localize, re-case, or abbreviate these values — pass them through verbatim. This section is the single source of truth; other sections cross-reference it rather than redefining these values.
+
+This contract covers only fixed, library-defined string values. It does **not** cover free-form fields such as `model` (§12.2), error messages, log text, or user-supplied prompt/schema content.
+
+### 12.1 Provider IDs
+
+| ID | Provider |
+|---|---|
+| `anthropic` | Anthropic (Claude) |
+| `openai` | OpenAI |
+| `perplexity` | Perplexity |
+| `nvidia` | NVIDIA (NIM-hosted open models) |
+| `huggingface` | Hugging Face |
+| `openrouter` | OpenRouter (multi-vendor model aggregator/router) |
+
+Lowercase, single word, no separators — chosen so the same literal is also valid as a bare enum-member name in every target language (e.g. `Provider.HUGGINGFACE` in Java, `Provider.huggingface` in Python). Used for: `RouteEntry.provider`, `ModelEntry.provider`, `ProviderAdapter.id`, `Response.providerUsed`, `AttemptRecord.provider`, and as the implicit key in the §6.1 environment-variable table.
+
+Adding a 6th+ provider later should follow the same convention (lowercase, single word) and be appended here first, before any implementation adopts it.
+
+### 12.2 Model identifiers
+
+**Not a fixed enum.** `model` is always the literal model identifier string as defined by that provider's own API/docs (e.g. `"claude-opus-5"`, `"gpt-5.1"`, `"llama-3.3-70b-instruct"`). Because the Model Capability Table (§7) is user-mutable and provider lineups change independently of this spec, implementations must not hardcode or validate against a closed set of model strings — only the `provider` field is a closed enum.
+
+### 12.3 `thinkingLevel`
+
+`low` | `medium` | `high` | `max` — full tier semantics and the selection heuristic are in §7.2.
+
+### 12.4 `structuredOutputStrategy`
+
+`native` | `promptFallback` | `auto` — full semantics are in §4.
+
+### 12.5 `Message.role`
+
+`system` | `user` | `assistant` | `tool`
+
+### 12.6 `AttemptRecord.outcome`
+
+`success` | `failed` | `skipped`
+
+### 12.7 `droppedFeatures` entries
+
+Exactly the two request-field names they refer to: `responseSchema` | `tools` (matching the field names in §3's `Request` shape, camelCase, no other spellings).
+
+### 12.8 Canonical error codes
+
+Each condition in §10 that results in a raised error should expose a stable, machine-readable code alongside its human-readable message — as a `.code`/`.errorCode` property, an error subtype/enum variant, or whatever discrimination mechanism is idiomatic for the language — using these exact values, so calling code can branch on failure category identically regardless of which language implementation is in use:
+
+| Code | Raised when |
+|---|---|
+| `ROUTER_EXHAUSTED` | Every candidate in the resolved route failed or was skipped (§5.1.1). |
+| `NO_PROVIDERS_CONFIGURED` | No provider credentials were detected anywhere at first use (§5.2, §10). |
+| `INVALID_CONFIG` | A malformed `RouterConfig` was supplied, e.g. an invalid `thinkingLevel` value (§10). |

@@ -1,90 +1,96 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-14",
+  "lastUpdated": "2026-09-14T13:09:26Z",
   "notes": "Seed data. Pricing and lineups change frequently — treat as best-effort and refresh periodically. See MODEL_CAPABILITY_HEURISTICS.md for the scoring methodology and the update-model-capability-table skill for the refresh procedure. Hugging Face is intentionally excluded (too many models to seed meaningfully) — add entries there yourself via registerModel(). OpenRouter entries are limited to models not already covered by the anthropic/openai/perplexity entries below (per project decision), to avoid redundant duplicate listings of the same underlying models.",
   "models": [
     {
       "provider": "anthropic",
       "model": "claude-fable-5-1",
-      "inputCostPerMillionTokens": 10.0,
-      "outputCostPerMillionTokens": 50.0,
+      "inputCostPerMillionTokens": 10,
+      "outputCostPerMillionTokens": 50,
       "thinkingScore": 10,
       "speedScore": 2,
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "anthropic",
       "model": "claude-opus-5",
-      "inputCostPerMillionTokens": 5.0,
-      "outputCostPerMillionTokens": 25.0,
+      "inputCostPerMillionTokens": 5,
+      "outputCostPerMillionTokens": 25,
       "thinkingScore": 9,
       "speedScore": 4,
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "anthropic",
       "model": "claude-sonnet-5",
-      "inputCostPerMillionTokens": 2.0,
-      "outputCostPerMillionTokens": 10.0,
+      "inputCostPerMillionTokens": 2,
+      "outputCostPerMillionTokens": 10,
       "thinkingScore": 7.5,
       "speedScore": 7,
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "anthropic",
       "model": "claude-haiku-4-5-20251001",
-      "inputCostPerMillionTokens": 1.0,
-      "outputCostPerMillionTokens": 5.0,
+      "inputCostPerMillionTokens": 1,
+      "outputCostPerMillionTokens": 5,
       "thinkingScore": 6,
       "speedScore": 10,
       "contextWindowTokens": 200000,
       "maxOutputTokens": 64000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openai",
       "model": "gpt-6-astra",
-      "inputCostPerMillionTokens": 10.0,
-      "outputCostPerMillionTokens": 50.0,
+      "inputCostPerMillionTokens": 10,
+      "outputCostPerMillionTokens": 50,
       "thinkingScore": 9.5,
       "speedScore": 3,
       "contextWindowTokens": 1050000,
       "maxOutputTokens": 32768,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openai",
       "model": "gpt-5.6-sol",
-      "inputCostPerMillionTokens": 4.0,
-      "outputCostPerMillionTokens": 20.0,
+      "inputCostPerMillionTokens": 4,
+      "outputCostPerMillionTokens": 20,
       "thinkingScore": 7.5,
       "speedScore": 6,
       "contextWindowTokens": 1050000,
       "maxOutputTokens": 32768,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openai",
       "model": "gpt-5.4-nano",
-      "inputCostPerMillionTokens": 0.20,
+      "inputCostPerMillionTokens": 0.2,
       "outputCostPerMillionTokens": 1.25,
       "thinkingScore": 4,
       "speedScore": 8.5,
@@ -92,72 +98,78 @@
       "maxOutputTokens": 16384,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "perplexity",
       "model": "sonar-reasoning-pro",
-      "inputCostPerMillionTokens": 2.0,
-      "outputCostPerMillionTokens": 8.0,
+      "inputCostPerMillionTokens": 2,
+      "outputCostPerMillionTokens": 8,
       "thinkingScore": 8,
       "speedScore": 3,
       "contextWindowTokens": 127072,
       "maxOutputTokens": 8000,
       "supportsStructuredOutput": true,
       "supportsTools": false,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "perplexity",
       "model": "sonar-pro",
-      "inputCostPerMillionTokens": 3.0,
-      "outputCostPerMillionTokens": 15.0,
+      "inputCostPerMillionTokens": 3,
+      "outputCostPerMillionTokens": 15,
       "thinkingScore": 7,
       "speedScore": 5,
       "contextWindowTokens": 127072,
       "maxOutputTokens": 8000,
       "supportsStructuredOutput": true,
       "supportsTools": false,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "perplexity",
       "model": "sonar",
-      "inputCostPerMillionTokens": 1.0,
-      "outputCostPerMillionTokens": 1.0,
+      "inputCostPerMillionTokens": 1,
+      "outputCostPerMillionTokens": 1,
       "thinkingScore": 5,
       "speedScore": 7,
       "contextWindowTokens": 127072,
       "maxOutputTokens": 8000,
       "supportsStructuredOutput": true,
       "supportsTools": false,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "nvidia",
       "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-      "inputCostPerMillionTokens": 1.60,
-      "outputCostPerMillionTokens": 1.60,
+      "inputCostPerMillionTokens": 1.6,
+      "outputCostPerMillionTokens": 1.6,
       "thinkingScore": 8,
       "speedScore": 3,
       "contextWindowTokens": 128000,
       "maxOutputTokens": 8192,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "nvidia",
       "model": "mistralai/mistral-large-2-instruct",
-      "inputCostPerMillionTokens": 2.0,
-      "outputCostPerMillionTokens": 6.0,
+      "inputCostPerMillionTokens": 2,
+      "outputCostPerMillionTokens": 6,
       "thinkingScore": 7,
       "speedScore": 5,
       "contextWindowTokens": 128000,
       "maxOutputTokens": 8192,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "nvidia",
@@ -170,7 +182,8 @@
       "maxOutputTokens": 8192,
       "supportsStructuredOutput": false,
       "supportsTools": true,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "nvidia",
@@ -183,20 +196,22 @@
       "maxOutputTokens": 4096,
       "supportsStructuredOutput": false,
       "supportsTools": false,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "google/gemini-3.1-pro-preview",
-      "inputCostPerMillionTokens": 2.0,
-      "outputCostPerMillionTokens": 12.0,
+      "inputCostPerMillionTokens": 2,
+      "outputCostPerMillionTokens": 12,
       "thinkingScore": 9,
       "speedScore": 3.5,
       "contextWindowTokens": 1050000,
       "maxOutputTokens": 65536,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
@@ -209,51 +224,55 @@
       "maxOutputTokens": 65536,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "google/gemini-3.5-flash-lite",
-      "inputCostPerMillionTokens": 0.30,
-      "outputCostPerMillionTokens": 2.50,
+      "inputCostPerMillionTokens": 0.3,
+      "outputCostPerMillionTokens": 2.5,
       "thinkingScore": 4.5,
       "speedScore": 9,
       "contextWindowTokens": 1050000,
       "maxOutputTokens": 32768,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "x-ai/grok-4.6",
-      "inputCostPerMillionTokens": 2.0,
-      "outputCostPerMillionTokens": 6.0,
+      "inputCostPerMillionTokens": 2,
+      "outputCostPerMillionTokens": 6,
       "thinkingScore": 9,
       "speedScore": 3.5,
       "contextWindowTokens": 500000,
       "maxOutputTokens": 32768,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "x-ai/grok-4.3",
       "inputCostPerMillionTokens": 1.25,
-      "outputCostPerMillionTokens": 2.50,
+      "outputCostPerMillionTokens": 2.5,
       "thinkingScore": 7,
       "speedScore": 5.5,
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 32768,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "meta-llama/llama-4-maverick",
-      "inputCostPerMillionTokens": 0.20,
+      "inputCostPerMillionTokens": 0.2,
       "outputCostPerMillionTokens": 0.696,
       "thinkingScore": 7.5,
       "speedScore": 6,
@@ -261,12 +280,13 @@
       "maxOutputTokens": 16384,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": true
+      "supportsVision": true,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "meta-llama/llama-3.3-70b-instruct",
-      "inputCostPerMillionTokens": 0.10,
+      "inputCostPerMillionTokens": 0.1,
       "outputCostPerMillionTokens": 0.32,
       "thinkingScore": 6,
       "speedScore": 6,
@@ -274,7 +294,8 @@
       "maxOutputTokens": 8192,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
@@ -287,7 +308,8 @@
       "maxOutputTokens": 8192,
       "supportsStructuredOutput": false,
       "supportsTools": false,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
@@ -300,20 +322,22 @@
       "maxOutputTokens": 32768,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     },
     {
       "provider": "openrouter",
       "model": "deepseek/deepseek-v4.1-flash",
       "inputCostPerMillionTokens": 0.15,
-      "outputCostPerMillionTokens": 0.60,
+      "outputCostPerMillionTokens": 0.6,
       "thinkingScore": 6,
       "speedScore": 8,
       "contextWindowTokens": 1050000,
       "maxOutputTokens": 16384,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": false
+      "supportsVision": false,
+      "lastUpdated": "2026-09-14T13:09:26Z"
     }
   ]
 }

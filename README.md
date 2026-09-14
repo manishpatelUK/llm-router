@@ -16,12 +16,28 @@ A lightweight, embeddable library — implemented per-language — that gives an
 
 Pricing and model lineups go stale fast — that's expected, and the table is designed to be refreshed, not treated as a one-time snapshot.
 
-**Easiest way:** in Claude Code, run:
+**Easiest way:** in Claude Code, run the `update-model-capability-table` skill. It supports a few modes:
 
 ```
 /update-model-capability-table
 ```
+Full refresh: re-researches current pricing/lineups for every provider already in the table, re-scores changed or new models using the documented heuristic, removes any model that's been deprecated/retired, and rewrites `model-capability-table.json`.
 
-This re-researches current pricing/lineups per provider, re-scores changed or new models using the documented heuristic, and rewrites `model-capability-table.json`.
+```
+/update-model-capability-table add openrouter/qwen-3-max
+```
+Add mode: researches and scores only the named model(s) and inserts them, without touching the rest of the table.
 
-**To update by hand:** read `MODEL_CAPABILITY_HEURISTICS.md` first, then edit `model-capability-table.json` directly, keeping the exact field shape defined in `LIBRARY_SPEC.md` §7.1 and bumping the `lastUpdated` field.
+```
+/update-model-capability-table provider:openai
+```
+Provider refresh: runs the full refresh procedure (research, re-score, deprecation check), scoped to just one provider.
+
+```
+/update-model-capability-table prune
+```
+Prune mode: scans every provider for deprecated/retired models and removes them — no re-pricing, no additions.
+
+Every run (except a no-op) rewrites the file via a small local Node script that de-duplicates `models` by `provider`+`model` (keeping the last entry for any collision) and stamps every row's `lastUpdated` with the current UTC timestamp, so the table both stays free of duplicate rows and always tells you how fresh each individual entry is — not just the file as a whole.
+
+**To update by hand:** read `MODEL_CAPABILITY_HEURISTICS.md` first, then edit `model-capability-table.json` directly, keeping the exact field shape defined in `LIBRARY_SPEC.md` §7.1 (including each row's own `lastUpdated` ISO 8601 UTC timestamp) and bumping the top-level `lastUpdated` field to match.

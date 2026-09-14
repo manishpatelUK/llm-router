@@ -85,11 +85,11 @@ Check the provider's own feature/model-comparison page or API reference; these a
 
 ## Updating the table
 
-Run the `update-model-capability-table` skill (`/update-model-capability-table`). At a high level it will, per provider:
+Run the `update-model-capability-table` skill (`/update-model-capability-table`, with optional mode arguments — see the skill file for `add`, `provider:<name>`, and `prune` modes). At a high level a full refresh will, per provider:
 
-1. Re-fetch current pricing/lineup from the priority-ordered sources above.
-2. Diff against the existing `model-capability-table.json` — flag any model that's been retired/renamed, and any new model worth adding.
+1. Re-fetch current pricing/lineup from the priority-ordered sources above, actively looking for models that aren't in the table yet — not just re-checking rows that already exist.
+2. Diff against the existing `model-capability-table.json` — flag any model that's been retired/renamed for removal, and add any new model worth including.
 3. Recompute `thinkingScore`/`speedScore` using the heuristic above (not just copy old scores forward — tiers shift as lineups change).
-4. Rewrite `model-capability-table.json`, bump `lastUpdated`, and report what changed and what was estimated vs. sourced.
+4. Finalize via a local Node (or equivalent) script that de-duplicates `models` by the `provider`+`model` primary key (keeping the last occurrence), stamps every surviving row's `lastUpdated` field with the current UTC timestamp (ISO 8601, e.g. `2026-09-14T13:09:26Z`) along with the top-level `lastUpdated`, and writes the file back. Report what changed and what was estimated vs. sourced.
 
-Do this periodically (pricing and lineups move fast — see the "best effort, expected to go stale" note in `LIBRARY_SPEC.md` §7.1) and whenever you notice the table is visibly wrong (a model in the table has been retired, a new flagship has shipped, etc.).
+Do this periodically (pricing and lineups move fast — see the "best effort, expected to go stale" note in `LIBRARY_SPEC.md` §7.1) and whenever you notice the table is visibly wrong (a model in the table has been retired, a new flagship has shipped, etc.). Each row's own `lastUpdated` is what tells you *which* rows are stale, rather than relying on a single whole-file timestamp.
