@@ -52,7 +52,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Every call variant funnels into {@link #complete(Request)} / {@link #completeAsync(Request)}
  * — the cascading overloads below just build a {@link Request} and delegate. Use
- * {@link Request#builder()} directly for the fully general case (combining {@code tools},
+ * {@code Request.builder()} directly for the fully general case (combining {@code tools},
  * {@code responseSchema}, and {@code attachments} in one call).
  */
 public final class LlmRouter {

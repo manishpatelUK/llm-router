@@ -12,7 +12,7 @@ import lombok.extern.jackson.Jacksonized;
  * An immutable snapshot of a single provider/model row from the Model Capability Table.
  *
  * <p>Mirrors the canonical {@code ModelEntry} schema defined in {@code LIBRARY_SPEC.md} §7.1.
- * Instances are only ever constructed via {@link #builder()} (directly, or by Jackson when
+ * Instances are only ever constructed via {@code builder()} (directly, or by Jackson when
  * deserializing {@code model-capability-table.json}); there are no setters, so a reference to
  * one can be shared freely across threads.
  */
