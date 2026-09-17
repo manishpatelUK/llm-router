@@ -81,6 +81,12 @@ Check the provider's own feature/model-comparison page or API reference; these a
 - `supportsFileInput` (non-image document attachments, e.g. PDF): `true` only if the provider documents a general document/file-upload input mechanism for that model (not just images) — e.g. a Files API or inline-document content-block type. A provider whose API is purely OpenAI-compatible chat-completions with no documented document-upload path gets `false` even if the underlying model could theoretically handle document text pasted inline, since that's not a distinct request-level capability this flag is meant to track.
 - `supportsFileOutput`: `true` only if the provider documents a mechanism for the model to *produce* a downloadable file as part of a response (e.g. a code-execution tool with file output, or a dedicated image-generation tool) — not just text/JSON output. Most chat-completions-only providers (no code-execution or file-generation tool in their API) get `false`.
 
+## `supportsTemperature`, `supportsTopP` (booleans)
+
+Whether the model's API accepts a caller-supplied value for that sampling parameter at all. Default `true` for both — nearly every chat-completions-style API exposes standard `temperature`/`top_p` parameters. Set to `false` only when the provider's own docs say the parameter is rejected, ignored, or locked to a fixed value for that specific model — the most common cause is an always-on deep/extended/adaptive reasoning mode (the same signal that earns the `thinkingScore` always-on-reasoning bonus above): those modes frequently force sampling to a fixed configuration internally and reject a caller override. A model whose reasoning mode is *toggleable* (off by default, or an explicit per-call flag) doesn't get this penalty — the restriction only applies while that mode is actually active, and this table scores the model's default calling shape.
+
+Score independently — a model can lock `temperature` while still honoring `topP` (or vice versa); don't assume one implies the other.
+
 ## Worked example
 
 `claude-sonnet-5`: Anthropic's docs describe it as "the best combination of speed and intelligence" — a mid-tier, balanced positioning (not flagship, not the fast/cheap tier) → thinkingScore base 7.5 (mid-tier midpoint), no reasoning-always-on bonus (adaptive thinking is available but not always-on the way Claude Fable 5.1's is) → **7.5**. Comparative latency is documented as "Fast" (one step better than Opus's "Moderate") → speedScore base 6 (mid-tier), +1 for the explicit "fast" positioning → **7**.

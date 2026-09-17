@@ -49,6 +49,15 @@ public class ModelEntry {
     /** Can produce downloadable generated files, e.g. via code execution or image generation — see §4. */
     boolean supportsFileOutput;
 
+    /**
+     * Accepts a caller-supplied sampling-temperature value — {@code false} if the model's API
+     * rejects/ignores it (e.g. a reasoning mode with a fixed sampling configuration) — see §4.
+     */
+    boolean supportsTemperature;
+
+    /** Accepts a caller-supplied nucleus-sampling (top-p) value, same rationale as {@link #supportsTemperature} — see §4. */
+    boolean supportsTopP;
+
     /** UTC timestamp of when this specific row was last verified/updated. */
     Instant lastUpdated;
 }

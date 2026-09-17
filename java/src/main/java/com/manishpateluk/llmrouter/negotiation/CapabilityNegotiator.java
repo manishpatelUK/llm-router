@@ -27,6 +27,19 @@ public final class CapabilityNegotiator {
      * @param strategy how to handle an unsupported {@code responseSchema}; see §4 and §12.4
      */
     public static NegotiationResult negotiate(ModelEntry model, Request request, StructuredOutputStrategy strategy) {
+        return negotiate(model, request, strategy, null, null);
+    }
+
+    /**
+     * @param strategy how to handle an unsupported {@code responseSchema}; see §4 and §12.4
+     * @param temperature {@code RouterConfig.temperature} (§5); {@code null} if not requested
+     * @param topP {@code RouterConfig.topP} (§5); {@code null} if not requested. If both
+     *        {@code temperature} and {@code topP} are non-null, at most one is ever sent —
+     *        whichever the candidate model supports, preferring {@code temperature} if it
+     *        supports both — since providers universally recommend against combining them.
+     */
+    public static NegotiationResult negotiate(
+            ModelEntry model, Request request, StructuredOutputStrategy strategy, Double temperature, Double topP) {
         Objects.requireNonNull(model, "model must not be null");
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(strategy, "strategy must not be null");
@@ -58,6 +71,27 @@ public final class CapabilityNegotiator {
         if (!request.getAttachments().isEmpty() && !allAttachmentsSupported(request.getAttachments(), model)) {
             droppedFeatures.add("attachments");
             adapted.attachments(List.of());
+        }
+
+        // Providers universally recommend altering temperature OR top_p, never both, since combining
+        // them compounds unpredictably — not a wire-protocol restriction, but this library enforces it:
+        // when both are requested and the candidate model supports temperature, temperature wins.
+        boolean preferTemperatureOverTopP = temperature != null && topP != null && model.isSupportsTemperature();
+
+        if (temperature != null) {
+            if (model.isSupportsTemperature()) {
+                adapted.temperature(temperature);
+            } else {
+                droppedFeatures.add("temperature");
+            }
+        }
+
+        if (topP != null) {
+            if (model.isSupportsTopP() && !preferTemperatureOverTopP) {
+                adapted.topP(topP);
+            } else {
+                droppedFeatures.add("topP");
+            }
         }
 
         return NegotiationResult.builder()

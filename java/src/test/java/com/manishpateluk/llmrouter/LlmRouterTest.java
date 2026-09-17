@@ -252,6 +252,124 @@ class LlmRouterTest {
     }
 
     @Test
+    void onlyTemperatureSentToAdapterWhenSupported() {
+        registerFixtureModel(false, false, false, true, true);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isEqualTo(0.7);
+            assertThat(sent.getTopP()).isNull();
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void temperaturePreferredOverTopPWhenBothRequestedAndModelSupportsBoth() {
+        registerFixtureModel(false, false, false, true, true);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isEqualTo(0.7);
+            assertThat(sent.getTopP()).isNull();
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).containsExactly("topP");
+    }
+
+    @Test
+    void topPUsedWhenBothRequestedButModelOnlySupportsTopP() {
+        registerFixtureModel(false, false, false, false, true);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isNull();
+            assertThat(sent.getTopP()).isEqualTo(0.9);
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).containsExactly("temperature");
+    }
+
+    @Test
+    void temperatureAndTopPDroppedAndReportedWhenModelDoesNotSupportThem() {
+        registerFixtureModel(false, false, false, false, false);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isNull();
+            assertThat(sent.getTopP()).isNull();
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).containsExactlyInAnyOrder("temperature", "topP");
+    }
+
+    @Test
+    void temperatureAndTopPForwardedOptimisticallyForModelNotInCapabilityTable() {
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("unregistered-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isEqualTo(0.7);
+            assertThat(sent.getTopP()).isEqualTo(0.9);
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "unregistered-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
     void asyncFallsBackAcrossCandidates() {
         stubId(anthropic, Provider.ANTHROPIC);
         stubId(openai, Provider.OPENAI);
@@ -307,6 +425,11 @@ class LlmRouterTest {
     }
 
     private static void registerFixtureModel(boolean structuredOutput, boolean tools, boolean vision) {
+        registerFixtureModel(structuredOutput, tools, vision, true, true);
+    }
+
+    private static void registerFixtureModel(
+            boolean structuredOutput, boolean tools, boolean vision, boolean temperature, boolean topP) {
         ModelCapabilityTable.registerModel(ModelEntry.builder()
                 .provider(Provider.OPENROUTER)
                 .model("fixture-model")
@@ -321,6 +444,8 @@ class LlmRouterTest {
                 .supportsVision(vision)
                 .supportsFileInput(false)
                 .supportsFileOutput(false)
+                .supportsTemperature(temperature)
+                .supportsTopP(topP)
                 .lastUpdated(Instant.parse("2026-01-01T00:00:00Z"))
                 .build());
     }

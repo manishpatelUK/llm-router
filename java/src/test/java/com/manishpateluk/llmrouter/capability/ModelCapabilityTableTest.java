@@ -32,4 +32,15 @@ class ModelCapabilityTableTest {
 
         assertThat(byId).isEqualTo(byEnum);
     }
+
+    @Test
+    void seedModelsCarryTemperatureAndTopPCapabilityFlags() {
+        ModelEntry alwaysOnReasoningModel = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-fable-5-1").orElseThrow();
+        assertThat(alwaysOnReasoningModel.isSupportsTemperature()).isFalse();
+        assertThat(alwaysOnReasoningModel.isSupportsTopP()).isTrue();
+
+        ModelEntry ordinaryModel = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-sonnet-5").orElseThrow();
+        assertThat(ordinaryModel.isSupportsTemperature()).isTrue();
+        assertThat(ordinaryModel.isSupportsTopP()).isTrue();
+    }
 }

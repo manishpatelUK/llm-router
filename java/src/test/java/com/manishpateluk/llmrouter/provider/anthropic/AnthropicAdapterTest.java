@@ -81,6 +81,32 @@ class AnthropicAdapterTest {
     }
 
     @Test
+    void sendIncludesTemperatureAndTopPWhenPresent() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
+
+        assertThat(captor.getValue().temperature()).isEqualTo(java.util.Optional.of(0.7));
+        assertThat(captor.getValue().topP()).isEqualTo(java.util.Optional.of(0.9));
+    }
+
+    @Test
+    void sendOmitsTemperatureAndTopPWhenAbsent() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5", Request.builder().prompt("hi").build());
+
+        assertThat(captor.getValue().temperature()).isEmpty();
+        assertThat(captor.getValue().topP()).isEmpty();
+    }
+
+    @Test
     void sendMapsToolUseBlockToToolCall() {
         when(client.messages()).thenReturn(messageService);
         when(messageService.create(any(MessageCreateParams.class))).thenReturn(toolUseMessage());

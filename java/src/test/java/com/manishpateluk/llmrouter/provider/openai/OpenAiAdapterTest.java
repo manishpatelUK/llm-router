@@ -74,6 +74,34 @@ class OpenAiAdapterTest {
     }
 
     @Test
+    void sendIncludesTemperatureAndTopPWhenPresent() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
+
+        assertThat(captor.getValue().temperature()).isEqualTo(Optional.of(0.7));
+        assertThat(captor.getValue().topP()).isEqualTo(Optional.of(0.9));
+    }
+
+    @Test
+    void sendOmitsTemperatureAndTopPWhenAbsent() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder().prompt("hi").build());
+
+        assertThat(captor.getValue().temperature()).isEmpty();
+        assertThat(captor.getValue().topP()).isEmpty();
+    }
+
+    @Test
     void sendMapsFunctionToolCallToToolCall() {
         when(client.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(completionService);

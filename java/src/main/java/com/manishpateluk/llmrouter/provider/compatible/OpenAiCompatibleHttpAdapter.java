@@ -96,6 +96,13 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         body.set("messages", buildMessages(request));
         body.put("max_tokens", resolveMaxTokens(model));
 
+        if (request.getTemperature() != null) {
+            body.put("temperature", request.getTemperature());
+        }
+        if (request.getTopP() != null) {
+            body.put("top_p", request.getTopP());
+        }
+
         if (!request.getTools().isEmpty()) {
             body.set("tools", buildTools(request.getTools()));
         }

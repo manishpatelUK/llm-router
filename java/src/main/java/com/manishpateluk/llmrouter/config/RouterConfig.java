@@ -34,4 +34,20 @@ public class RouterConfig {
 
     @Builder.Default
     StructuredOutputStrategy structuredOutputStrategy = StructuredOutputStrategy.AUTO;
+
+    /**
+     * Optional sampling temperature; {@code null} means "use the provider's own default". Sent
+     * to the model only if the resolved candidate's {@code ModelEntry.supportsTemperature} is
+     * {@code true} — otherwise omitted for that attempt and recorded in {@code droppedFeatures}
+     * (§4).
+     */
+    Double temperature;
+
+    /**
+     * Optional nucleus-sampling (top-p) parameter; {@code null} means "use the provider's own
+     * default". Sent to the model only if the resolved candidate's {@code ModelEntry.supportsTopP}
+     * is {@code true} — otherwise omitted for that attempt and recorded in {@code droppedFeatures}
+     * (§4).
+     */
+    Double topP;
 }

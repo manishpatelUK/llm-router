@@ -93,6 +93,13 @@ public final class OpenAiAdapter implements ProviderAdapter {
                 .model(model)
                 .maxTokens(resolveMaxTokens(model));
 
+        if (request.getTemperature() != null) {
+            builder.temperature(request.getTemperature());
+        }
+        if (request.getTopP() != null) {
+            builder.topP(request.getTopP());
+        }
+
         String system = buildSystemInstructions(request);
         if (system != null) {
             builder.addSystemMessage(system);

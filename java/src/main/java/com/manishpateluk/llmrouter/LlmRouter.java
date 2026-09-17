@@ -249,14 +249,20 @@ public final class LlmRouter {
 
     private NegotiationResult negotiate(ModelEntry modelEntry, Request request, RouterConfig config) {
         if (modelEntry == null) {
-            // Unknown model (not in the capability table) — nothing to negotiate against; send as-is.
+            // Unknown model (not in the capability table) — nothing to negotiate against; send as-is,
+            // optimistically forwarding temperature/topP since there's no capability data to check them against.
+            Request adapted = request.toBuilder()
+                    .temperature(config.getTemperature())
+                    .topP(config.getTopP())
+                    .build();
             return NegotiationResult.builder()
-                    .adaptedRequest(request)
+                    .adaptedRequest(adapted)
                     .droppedFeatures(List.of())
                     .structuredOutputViaPromptFallback(false)
                     .build();
         }
-        NegotiationResult result = CapabilityNegotiator.negotiate(modelEntry, request, config.getStructuredOutputStrategy());
+        NegotiationResult result = CapabilityNegotiator.negotiate(
+                modelEntry, request, config.getStructuredOutputStrategy(), config.getTemperature(), config.getTopP());
         if (!result.getDroppedFeatures().isEmpty()) {
             log.warn("Dropped features {} for {}/{} due to capability mismatch",
                     result.getDroppedFeatures(), modelEntry.getProvider(), modelEntry.getModel());

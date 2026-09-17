@@ -146,6 +146,78 @@ class CapabilityNegotiatorTest {
     }
 
     @Test
+    void onlyTemperatureRequestedSentWhenSupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, true, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, null);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.getAdaptedRequest().getTemperature()).isEqualTo(0.7);
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void onlyTopPRequestedSentWhenSupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, true, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, null, 0.9);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isEqualTo(0.9);
+    }
+
+    @Test
+    void temperaturePreferredOverTopPWhenBothRequestedAndBothSupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, true, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, 0.9);
+
+        assertThat(result.getDroppedFeatures()).containsExactly("topP");
+        assertThat(result.getAdaptedRequest().getTemperature()).isEqualTo(0.7);
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void topPUsedWhenBothRequestedButModelOnlySupportsTopP() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, false, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, 0.9);
+
+        assertThat(result.getDroppedFeatures()).containsExactly("temperature");
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isEqualTo(0.9);
+    }
+
+    @Test
+    void temperatureAndTopPDroppedWhenUnsupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, 0.9);
+
+        assertThat(result.getDroppedFeatures()).containsExactlyInAnyOrder("temperature", "topP");
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void temperatureAndTopPLeftUnsetWhenNotRequested() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, null, null);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
     void negotiationIsIndependentPerAttemptAndDoesNotMutateOriginalRequest() {
         Request original = Request.builder().prompt("p")
                 .tools(List.of(com.manishpateluk.llmrouter.model.ToolDefinition.builder()
@@ -161,6 +233,12 @@ class CapabilityNegotiatorTest {
     }
 
     private static ModelEntry fixture(boolean structuredOutput, boolean tools, boolean vision, boolean fileInput) {
+        return fixture(structuredOutput, tools, vision, fileInput, true, true);
+    }
+
+    private static ModelEntry fixture(
+            boolean structuredOutput, boolean tools, boolean vision, boolean fileInput,
+            boolean temperature, boolean topP) {
         return ModelEntry.builder()
                 .provider(Provider.ANTHROPIC)
                 .model("test-model")
@@ -175,6 +253,8 @@ class CapabilityNegotiatorTest {
                 .supportsVision(vision)
                 .supportsFileInput(fileInput)
                 .supportsFileOutput(false)
+                .supportsTemperature(temperature)
+                .supportsTopP(topP)
                 .lastUpdated(Instant.parse("2026-01-01T00:00:00Z"))
                 .build();
     }

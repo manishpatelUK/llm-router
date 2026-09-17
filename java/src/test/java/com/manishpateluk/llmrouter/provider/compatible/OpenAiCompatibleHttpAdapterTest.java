@@ -85,6 +85,32 @@ class OpenAiCompatibleHttpAdapterTest {
     }
 
     @Test
+    void sendIncludesTemperatureAndTopPWhenPresent() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
+        adapter.send("sonar-pro", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
+
+        JsonNode body = JSON.readTree(captor.getValue().jsonBody());
+        assertThat(body.path("temperature").asDouble()).isEqualTo(0.7);
+        assertThat(body.path("top_p").asDouble()).isEqualTo(0.9);
+    }
+
+    @Test
+    void sendOmitsTemperatureAndTopPWhenAbsent() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
+        adapter.send("sonar-pro", Request.builder().prompt("hi").build());
+
+        JsonNode body = JSON.readTree(captor.getValue().jsonBody());
+        assertThat(body.has("temperature")).isFalse();
+        assertThat(body.has("top_p")).isFalse();
+    }
+
+    @Test
     void sendMapsImageAttachmentToImageUrlContentPart() throws Exception {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));

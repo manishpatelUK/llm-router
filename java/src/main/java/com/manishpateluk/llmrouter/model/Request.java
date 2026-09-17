@@ -41,4 +41,18 @@ public class Request {
 
     /** Falls back to the router's default config when {@code null}. */
     RouterConfig config;
+
+    /**
+     * Resolved from {@code RouterConfig.temperature} during capability negotiation (§4) —
+     * {@code null} if not requested, or dropped because the candidate model doesn't support it.
+     * Not intended to be set directly by callers; set {@code RouterConfig.temperature} instead.
+     */
+    Double temperature;
+
+    /**
+     * Resolved from {@code RouterConfig.topP} during capability negotiation (§4) — {@code null}
+     * if not requested, or dropped because the candidate model doesn't support it. Not intended
+     * to be set directly by callers; set {@code RouterConfig.topP} instead.
+     */
+    Double topP;
 }

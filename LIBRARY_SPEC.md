@@ -41,6 +41,8 @@ Request {
   tools: ToolDefinition[]?             // optional tool/function definitions the model may call
   attachments: Attachment[]?           // optional files to include with the prompt (documents, images, etc.)
   config: RouterConfig?                // optional; falls back to the router's default config if omitted
+  temperature: number?                 // resolved from RouterConfig.temperature (§5) during capability negotiation (§4) — not set directly by callers
+  topP: number?                        // resolved from RouterConfig.topP (§5) during capability negotiation (§4) — not set directly by callers
 }
 
 ToolDefinition {
@@ -111,6 +113,10 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 | `tools` | Sent natively via provider's tool-calling mechanism | Dropped, recorded in `droppedFeatures`. No prompt-based faking of tool calls — this is unreliable enough that dropping is the safe default. |
 | `history` | Mapped to provider's message format | N/A — all supported providers accept multi-turn history |
 | `attachments` | Sent natively via the provider's image/document input mechanism. Each attachment's `mediaType` is checked individually: `image/*` against `ModelEntry.supportsVision`, everything else against `ModelEntry.supportsFileInput`. | If **any** attachment in the request can't be supported by the chosen model, the whole `attachments` request is dropped (not sent) and recorded once in `droppedFeatures` — matching this table's existing feature-level (not per-item) granularity. |
+| `temperature` (`RouterConfig.temperature`) | Sent natively as the model's sampling-temperature parameter | Omitted from the outgoing request (not sent — the provider's own default applies), recorded in `droppedFeatures` |
+| `topP` (`RouterConfig.topP`) | Sent natively as the model's nucleus-sampling (top-p) parameter | Omitted from the outgoing request (not sent — the provider's own default applies), recorded in `droppedFeatures` |
+
+**`temperature`/`topP` mutual exclusion.** Providers universally document that altering `temperature` *or* `topP` — never both in the same request — is the recommended usage; combining them compounds unpredictably. This isn't a wire-protocol restriction (nothing rejects a request with both set), but the router enforces it as policy: if `RouterConfig` has both set, at most one is ever sent for a given attempt — whichever the candidate model supports, preferring `temperature` if it supports both. The other is omitted and recorded in `droppedFeatures` for that attempt, exactly as if the model didn't support it. This resolution is per-attempt like everything else in this section — a fallback to a model that only supports `topP` correctly sends `topP` instead.
 
 Separately, `Response.generatedFiles` is only ever populated when `ModelEntry.supportsFileOutput` is true for the model that served the request — this isn't something a caller requests per-call (there's no matching `Request` field), it's a property of whether the chosen model/provider combination can produce downloadable files at all (e.g. via a code-execution or image-generation tool).
 
@@ -130,6 +136,8 @@ RouterConfig {
   thinkingLevel: ThinkingLevel?     // "low" | "medium" | "high" | "max"; default "medium"
   costOptimized: boolean?           // default false — see §5.3
   structuredOutputStrategy: string? // "native" | "promptFallback" | "auto"; default "auto"
+  temperature: number?              // optional sampling temperature; no default (provider's own default applies when omitted). Sent to the model only if the resolved candidate's ModelEntry.supportsTemperature is true (§4, §7.1) — otherwise omitted for that attempt and recorded in droppedFeatures. If topP is also set, temperature wins whenever the candidate supports both — see §4's mutual-exclusion note.
+  topP: number?                     // optional nucleus-sampling (top-p) parameter; no default. Sent to the model only if the resolved candidate's ModelEntry.supportsTopP is true (§4, §7.1) — otherwise omitted for that attempt and recorded in droppedFeatures. If temperature is also set and the candidate supports both, topP is omitted instead — see §4's mutual-exclusion note.
 }
 
 RouteEntry =
@@ -216,6 +224,8 @@ ModelEntry {
   supportsVision: boolean
   supportsFileInput: boolean    // can accept non-image file attachments (documents, etc.) in a request — §4
   supportsFileOutput: boolean   // can produce downloadable generated files, e.g. via code execution or image generation — §4
+  supportsTemperature: boolean  // accepts a caller-supplied sampling-temperature value — false if the model's API rejects/ignores it (e.g. a reasoning mode with a fixed sampling configuration) — §4
+  supportsTopP: boolean         // accepts a caller-supplied nucleus-sampling (top-p) value, same rationale as supportsTemperature — §4
   lastUpdated: string          // ISO 8601 UTC timestamp, e.g. "2026-09-14T13:09:08Z" — when this specific row was last verified/updated
 }
 ```
@@ -360,7 +370,7 @@ Adding a 6th+ provider later should follow the same convention (lowercase, singl
 
 ### 12.7 `droppedFeatures` entries
 
-Exactly the request-field names they refer to: `responseSchema` | `tools` | `attachments` (matching the field names in §3's `Request` shape, camelCase, no other spellings).
+Exactly the request-field names they refer to: `responseSchema` | `tools` | `attachments` | `temperature` | `topP` (matching the field names in §3's `Request` shape / §5's `RouterConfig` shape, camelCase, no other spellings).
 
 ### 12.8 Canonical error codes
 
