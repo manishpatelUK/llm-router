@@ -54,17 +54,32 @@ import org.slf4j.LoggerFactory;
  * — the cascading overloads below just build a {@link Request} and delegate. Use
  * {@code Request.builder()} directly for the fully general case (combining {@code tools},
  * {@code responseSchema}, and {@code attachments} in one call).
+ *
+ * <p>An optional {@link RequestInterceptor} can be supplied at construction — see its javadoc
+ * and {@code LIBRARY_SPEC.md} §4.1 — as a last-chance hook to inspect or modify the fully
+ * negotiated request immediately before it's sent for each attempt.
  */
 public final class LlmRouter {
 
     private static final Logger log = LoggerFactory.getLogger(LlmRouter.class);
     private static final ObjectMapper STRUCTURED_OUTPUT_MAPPER = new ObjectMapper();
+    private static final RequestInterceptor NO_OP_INTERCEPTOR = (provider, model, request) -> request;
 
     private final Map<Provider, ProviderAdapter> adapters;
+    private final RequestInterceptor requestInterceptor;
 
     /** Detects credentials from the environment (§6) and builds all six built-in provider adapters. */
     public LlmRouter() {
-        this(defaultAdapters(new CredentialResolver()));
+        this(defaultAdapters(new CredentialResolver()), NO_OP_INTERCEPTOR);
+    }
+
+    /**
+     * Detects credentials from the environment (§6) and builds all six built-in provider
+     * adapters, with {@code requestInterceptor} as the last-chance hook before each attempt is
+     * sent — see {@link RequestInterceptor} and {@code LIBRARY_SPEC.md} §4.1.
+     */
+    public LlmRouter(RequestInterceptor requestInterceptor) {
+        this(defaultAdapters(new CredentialResolver()), requestInterceptor);
     }
 
     /**
@@ -74,12 +89,23 @@ public final class LlmRouter {
      * tests.
      */
     public LlmRouter(List<ProviderAdapter> adapters) {
+        this(adapters, NO_OP_INTERCEPTOR);
+    }
+
+    /**
+     * Builds a router from an explicit set of adapters, with {@code requestInterceptor} as the
+     * last-chance hook before each attempt is sent — see {@link RequestInterceptor} and
+     * {@code LIBRARY_SPEC.md} §4.1.
+     */
+    public LlmRouter(List<ProviderAdapter> adapters, RequestInterceptor requestInterceptor) {
         Objects.requireNonNull(adapters, "adapters must not be null");
+        Objects.requireNonNull(requestInterceptor, "requestInterceptor must not be null");
         Map<Provider, ProviderAdapter> byProvider = new LinkedHashMap<>();
         for (ProviderAdapter adapter : adapters) {
             byProvider.put(adapter.id(), adapter);
         }
         this.adapters = Map.copyOf(byProvider);
+        this.requestInterceptor = requestInterceptor;
     }
 
     private static List<ProviderAdapter> defaultAdapters(CredentialResolver credentials) {
@@ -136,7 +162,8 @@ public final class LlmRouter {
             NegotiationResult negotiation = negotiate(modelEntry, request, config);
 
             try {
-                Response fragment = adapter.send(candidate.getModel(), negotiation.getAdaptedRequest());
+                Request toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
+                Response fragment = adapter.send(candidate.getModel(), toSend);
                 return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);
             } catch (RuntimeException e) {
                 attempts.add(recordFailure(candidate, e));
@@ -216,7 +243,15 @@ public final class LlmRouter {
         RouterConfig config = resolveConfig(request);
         NegotiationResult negotiation = negotiate(modelEntry, request, config);
 
-        return adapter.sendAsync(candidate.getModel(), negotiation.getAdaptedRequest())
+        Request toSend;
+        try {
+            toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
+        } catch (RuntimeException e) {
+            attempts.add(recordFailure(candidate, e));
+            return attemptAsync(request, candidates, index + 1, attempts);
+        }
+
+        return adapter.sendAsync(candidate.getModel(), toSend)
                 .handle((fragment, throwable) -> {
                     if (throwable == null) {
                         return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);

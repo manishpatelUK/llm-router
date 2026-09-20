@@ -124,6 +124,25 @@ This negotiation happens **per attempt**, not once — if the router falls back 
 
 `droppedFeatures` entries must use the exact canonical values in §12.7 (`"responseSchema"`, `"tools"`, `"attachments"`) — not a paraphrase or a differently-cased variant — so calling code can reliably branch on them regardless of which language implementation produced the response.
 
+### 4.1 Request interceptor (optional last-chance hook)
+
+Implementations may offer an optional hook — a `RequestInterceptor` in the Java implementation, named per whatever's idiomatic elsewhere (a callback, a delegate, a middleware function) — that lets a caller inspect and modify the final, negotiated request immediately before it's sent to a specific provider/model. This is the last point in the pipeline where the outgoing request can still be changed: it runs *after* capability negotiation (this section), so the request it receives is the fully adapted form actually about to be sent for this attempt, not the caller's original `Request`. A caller might use this to compress conversation history against that exact model's context window right before sending, inject a provider-specific header via `original`-style metadata, or log/redact the outgoing payload.
+
+Shape (conceptual):
+
+```
+RequestInterceptor {
+  beforeSend(provider: string, model: string, request: Request): Request
+}
+```
+
+Contract:
+- Called once per attempt in the fallback loop (§5.1) — if an earlier candidate fails and the router advances to the next one, the hook runs again with that next candidate's own `provider`/`model` and its own freshly negotiated request.
+- Returning the request unchanged is a no-op; there is no way to skip a candidate or short-circuit fallback from inside the hook — it only transforms the request, it doesn't participate in routing decisions.
+- The default, when a caller supplies no hook, is the identity function — behavior is unchanged from a library with no interceptor at all.
+- The same hook instance is shared across every call the router instance serves, and applies uniformly regardless of which call style (sync/async/callback) was used to invoke the router.
+- If the hook itself throws, implementations should treat it the same as any other in-attempt failure (§10: not fatal, recorded as a failed attempt, router advances to the next candidate) rather than letting it escape uncaught — a broken interceptor shouldn't take down the whole call when a working fallback candidate exists.
+
 ---
 
 ## 5. `RouterConfig`

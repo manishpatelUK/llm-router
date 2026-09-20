@@ -136,6 +136,20 @@ The router never executes tool calls itself — it only returns what the model r
 
 See §8.1.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full design rationale.
 
+**Intercepting requests right before they're sent** — an optional last-chance hook to inspect or modify the fully negotiated request for each attempt, e.g. to compress conversation history against that exact model's context window:
+
+```java
+import com.manishpateluk.llmrouter.RequestInterceptor;
+
+RequestInterceptor interceptor = (provider, model, request) ->
+    request.toBuilder().history(trimHistoryFor(model, request.getHistory())).build();
+
+LlmRouter router = new LlmRouter(interceptor);
+// or, combined with a custom adapter list: new LlmRouter(adapters, interceptor)
+```
+
+It runs after capability negotiation, so `request` is the exact form about to be sent for that attempt — and it runs once per candidate, so on fallback you see each candidate's own `provider`/`model` in turn. Returning `request` unchanged is a no-op, and supplying no interceptor at all (the default) behaves identically to today. If the hook itself throws, that attempt is recorded as failed and the router falls back to the next candidate rather than failing the whole call. See §4.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full contract.
+
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
 
 ```java

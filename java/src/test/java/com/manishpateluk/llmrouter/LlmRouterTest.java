@@ -5,9 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -33,6 +36,7 @@ import com.manishpateluk.llmrouter.provider.ProviderAdapter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -101,6 +105,120 @@ class LlmRouterTest {
         assertThat(response.getAttempts().get(0).getProvider()).isEqualTo(Provider.ANTHROPIC);
         assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.FAILED);
         assertThat(response.getAttempts().get(0).getReason()).isEqualTo("rate limited");
+    }
+
+    @Test
+    void noInterceptorSuppliedDefaultsToIdentityBehavesLikeToday() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.send(eq("claude-opus-5"), captor.capture())).thenReturn(fragment("hello"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic)); // no interceptor supplied
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("hello");
+        assertThat(captor.getValue().getPrompt()).isEqualTo("hi"); // sent unmodified
+    }
+
+    @Test
+    void interceptorReceivesCorrectProviderAndModelPerCandidateIncludingOnFallback() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(anthropic.send(any(), any())).thenThrow(new RuntimeException("rate limited"));
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("recovered"));
+
+        List<String> seenCandidates = new ArrayList<>();
+        RequestInterceptor interceptor = (provider, model, request) -> {
+            seenCandidates.add(provider + "/" + model);
+            return request;
+        };
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai), interceptor);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("recovered");
+        assertThat(seenCandidates).containsExactly("anthropic/claude-opus-5", "openai/gpt-6-astra");
+    }
+
+    @Test
+    void interceptorMutationChangesWhatAdapterReceives() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.send(eq("claude-opus-5"), captor.capture())).thenReturn(fragment("ok"));
+
+        RequestInterceptor trimPrompt = (provider, model, request) -> request.toBuilder().prompt("trimmed").build();
+
+        LlmRouter router = new LlmRouter(List.of(anthropic), trimPrompt);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        router.complete("original prompt", config);
+
+        assertThat(captor.getValue().getPrompt()).isEqualTo("trimmed");
+    }
+
+    @Test
+    void interceptorAlsoAppliesOnTheAsyncPath() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.sendAsync(eq("claude-opus-5"), captor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(fragment("async ok")));
+
+        RequestInterceptor trimPrompt = (provider, model, request) -> request.toBuilder().prompt("trimmed-async").build();
+
+        LlmRouter router = new LlmRouter(List.of(anthropic), trimPrompt);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        Response response = router.completeAsync("original", config).join();
+
+        assertThat(response.getContent()).isEqualTo("async ok");
+        assertThat(captor.getValue().getPrompt()).isEqualTo("trimmed-async");
+    }
+
+    @Test
+    void interceptorThrowingIsRecordedAsFailedAttemptAndFallsBackToNextCandidate() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("recovered"));
+
+        RequestInterceptor throwsForAnthropic = (provider, model, request) -> {
+            if (provider == Provider.ANTHROPIC) {
+                throw new RuntimeException("interceptor boom");
+            }
+            return request;
+        };
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai), throwsForAnthropic);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("recovered");
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getProvider()).isEqualTo(Provider.ANTHROPIC);
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.FAILED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("interceptor boom");
+        verify(anthropic, never()).send(any(), any()); // interceptor failed before the adapter was ever called
     }
 
     @Test
