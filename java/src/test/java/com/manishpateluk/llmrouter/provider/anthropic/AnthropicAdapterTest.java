@@ -2,22 +2,33 @@ package com.manishpateluk.llmrouter.provider.anthropic;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.AnthropicClientAsync;
+import com.anthropic.models.files.FileMetadata;
+import com.anthropic.models.files.FileUploadParams;
 import com.anthropic.models.messages.ContentBlock;
+import com.anthropic.models.messages.ContentBlockParam;
+import com.anthropic.models.messages.DocumentBlockParam;
+import com.anthropic.models.messages.ImageBlockParam;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
+import com.anthropic.models.messages.MessageParam;
 import com.anthropic.models.messages.TextBlock;
 import com.anthropic.models.messages.ToolUseBlock;
 import com.anthropic.models.messages.Usage;
 import com.anthropic.services.async.MessageServiceAsync;
+import com.anthropic.services.blocking.FileService;
 import com.anthropic.services.blocking.MessageService;
+import com.manishpateluk.llmrouter.model.Attachment;
 import com.manishpateluk.llmrouter.model.Request;
 import com.manishpateluk.llmrouter.model.Response;
 import com.manishpateluk.llmrouter.provider.Provider;
@@ -35,6 +46,8 @@ class AnthropicAdapterTest {
     private AnthropicClient client;
     @Mock
     private MessageService messageService;
+    @Mock
+    private FileService fileService;
     @Mock
     private AnthropicClientAsync asyncClient;
     @Mock
@@ -117,6 +130,104 @@ class AnthropicAdapterTest {
         assertThat(response.getToolCalls()).hasSize(1);
         assertThat(response.getToolCalls().get(0).getName()).isEqualTo("lookup");
         assertThat(response.getToolCalls().get(0).getArguments()).containsEntry("query", "weather");
+    }
+
+    @Test
+    void sendUploadsAttachmentOnceAndReusesFileIdOnByteIdenticalRepeat() {
+        when(client.messages()).thenReturn(messageService);
+        when(client.files()).thenReturn(fileService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+        when(fileService.upload(any(FileUploadParams.class))).thenReturn(fixtureFileMetadata("file_abc"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        Attachment attachment = Attachment.builder().mediaType("image/png").data(new byte[]{1, 2, 3}).build();
+        Request request = Request.builder().prompt("describe this").attachments(List.of(attachment)).build();
+
+        adapter.send("claude-opus-5", request);
+        adapter.send("claude-opus-5", request);
+
+        verify(fileService, times(1)).upload(any(FileUploadParams.class));
+
+        for (MessageCreateParams sent : captor.getAllValues()) {
+            ImageBlockParam image = firstContentBlock(sent).asImage();
+            assertThat(image.source().isFile()).isTrue();
+            assertThat(image.source().asFile().fileId()).isEqualTo("file_abc");
+            assertThat(image.cacheControl()).isPresent();
+        }
+    }
+
+    @Test
+    void sendUploadsSeparateFileForDifferentAttachmentContent() {
+        when(client.messages()).thenReturn(messageService);
+        when(client.files()).thenReturn(fileService);
+        when(messageService.create(any(MessageCreateParams.class))).thenReturn(textMessage("ok"));
+        when(fileService.upload(any(FileUploadParams.class)))
+                .thenReturn(fixtureFileMetadata("file_one"))
+                .thenReturn(fixtureFileMetadata("file_two"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5", Request.builder().prompt("p")
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1}).build()))
+                .build());
+        adapter.send("claude-opus-5", Request.builder().prompt("p")
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{2}).build()))
+                .build());
+
+        verify(fileService, times(2)).upload(any(FileUploadParams.class));
+    }
+
+    @Test
+    void sendUploadsDocumentAttachmentAndReferencesFileId() {
+        when(client.messages()).thenReturn(messageService);
+        when(client.files()).thenReturn(fileService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+        when(fileService.upload(any(FileUploadParams.class))).thenReturn(fixtureFileMetadata("file_doc"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5", Request.builder().prompt("summarize")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).build()))
+                .build());
+
+        DocumentBlockParam document = firstContentBlock(captor.getValue()).asDocument();
+        assertThat(document.source().isFile()).isTrue();
+        assertThat(document.source().asFile().fileId()).isEqualTo("file_doc");
+        assertThat(document.cacheControl()).isPresent();
+    }
+
+    @Test
+    void sendFallsBackToInlineEmbeddingWhenUploadFails() {
+        when(client.messages()).thenReturn(messageService);
+        when(client.files()).thenReturn(fileService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+        when(fileService.upload(any(FileUploadParams.class))).thenThrow(new RuntimeException("quota exceeded"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        Response response = adapter.send("claude-opus-5", Request.builder().prompt("describe this")
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1, 2, 3}).build()))
+                .build());
+
+        assertThat(response.getContent()).isEqualTo("ok"); // upload failure doesn't fail the call
+        ImageBlockParam image = firstContentBlock(captor.getValue()).asImage();
+        assertThat(image.source().isBase64()).isTrue();
+        assertThat(image.cacheControl()).isPresent(); // cache_control still set on the inline fallback
+    }
+
+    private static ContentBlockParam firstContentBlock(MessageCreateParams sent) {
+        MessageParam userMessage = sent.messages().get(sent.messages().size() - 1);
+        return userMessage.content().asBlockParams().get(0);
+    }
+
+    private static FileMetadata fixtureFileMetadata(String id) {
+        return FileMetadata.builder()
+                .id(id)
+                .createdAt(OffsetDateTime.now())
+                .filename("attachment")
+                .mimeType("application/octet-stream")
+                .sizeBytes(3)
+                .build();
     }
 
     @Test

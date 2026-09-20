@@ -41,6 +41,10 @@ import com.manishpateluk.llmrouter.provider.compatible.HttpTransport.HttpRespons
  * API) — non-image document attachments aren't mapped for these four providers, since there's
  * no single convention for them the way there is for images; {@code Response.generatedFiles} is
  * always left empty, since none of these four providers document a file-generation mechanism.
+ * Unlike {@code AnthropicAdapter}/{@code OpenAiAdapter}, attachments here are always re-embedded
+ * inline on every call — none of these four vendors' OpenAI-compatible endpoints share a common,
+ * documented file-upload-and-reference convention this shared base could target generically, so
+ * no attempt is made to deduplicate repeated attachment content across calls for them.
  */
 public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
 

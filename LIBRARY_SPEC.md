@@ -288,6 +288,16 @@ ProviderAdapter {
 
 Provider adapters are responsible only for translating the unified `Request`/`Response` shapes to/from that provider's wire format. All routing, fallback, capability negotiation, and cost logic lives in the router core and is shared across every provider.
 
+#### 8.1.1 Attachment reuse across calls (optional adapter-internal optimization)
+
+`Request.attachments` is per-call, and `Message` (history) carries no attachment reference — a caller running a multi-turn conversation that keeps the same file relevant across several calls has no protocol-level way to say "this attachment hasn't changed since last time." Rather than growing the public `Request`/`Message` shape to express that (which would force every attachment-bearing history entry to carry provider-agnostic file identity, and raise awkward questions about replaying history against a provider that never saw the file, serializing/rehydrating that identity across process restarts, etc.), an adapter **may** solve this transparently, entirely on its own side of the `ProviderAdapter` boundary, when the underlying provider exposes a suitable mechanism (a file-upload API whose returned handle can be referenced from a later request instead of re-embedding the content, and/or an explicit prompt-caching hint on repeated content). Doing so is invisible to callers: they keep passing the same `Attachment` (same bytes) on `Request.attachments` every call, exactly as documented in §3, and get the optimization for free as long as they reuse the same adapter/router instance across the conversation — which the library already expects (§1, §6: construct once, reuse for the process lifetime).
+
+An adapter implementing this should:
+- Key reuse off the attachment's **content** (e.g. a hash of `mediaType` + bytes), never off object identity or a caller-supplied name, since two calls may pass distinct `Attachment` instances with identical bytes.
+- Scope the cache to a single adapter instance for a single provider — never share a handle across providers (a fallback from one provider to another must never assume the second provider has seen the file) and never persist it beyond the process, since the public contract gives callers no way to know a handle exists to invalidate.
+- Treat the mechanism as a pure optimization: if the upload/reference step itself fails for any reason, fall back to the provider's normal inline embedding for that one attempt rather than failing the request — a caller must see identical success/failure behavior whether or not this optimization is available for their provider.
+- Not assume every provider supports this — several providers (or several media types on the same provider) may have no such mechanism at all, in which case the adapter simply keeps re-embedding inline as it always has. This is expected to vary a lot by provider and isn't part of the cross-language contract; document per-adapter which media types/providers it applies to.
+
 ---
 
 ## 9. Logging

@@ -127,6 +127,15 @@ response.getToolCalls().forEach(call ->
 
 The router never executes tool calls itself — it only returns what the model requested; running them is your application's job. Attachments (`Request.builder().attachments(...)`) and a `responseSchema` for structured output work the same way — see [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) §3 and §4 for the full shape and how unsupported features get dropped and reported back to you.
 
+**Repeated attachments in a multi-turn conversation are deduplicated automatically.** If you pass the same attachment (byte-identical content) on `Request.attachments` across several calls — the common case for a tool-calling loop that keeps a file in context turn after turn — the Anthropic and OpenAI adapters upload it once via that provider's Files API and reference it by file id on every later call instead of re-encoding and re-sending the bytes. There's nothing to opt into: just keep passing the attachment as you already do, and reuse the same `LlmRouter` instance across the conversation (which you should be doing anyway). A few things worth knowing:
+
+- Anthropic dedupes both images and documents this way, and also tags every attachment content block with an ephemeral `cache_control` hint so Anthropic can reuse the surrounding prompt prefix cheaply.
+- OpenAI dedupes documents only — Chat Completions has no file-id path for images, so image attachments always re-embed inline.
+- It's a pure optimization: if the upload call itself fails for any reason, that attempt transparently falls back to full inline embedding rather than failing your request.
+- The other providers (currently Perplexity, NVIDIA, Hugging Face, OpenRouter) have no equivalent mechanism this library can target generically, so attachments to them are unaffected.
+
+See §8.1.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full design rationale.
+
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
 
 ```java

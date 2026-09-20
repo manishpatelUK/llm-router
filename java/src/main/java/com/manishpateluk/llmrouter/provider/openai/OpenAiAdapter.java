@@ -1,10 +1,15 @@
 package com.manishpateluk.llmrouter.provider.openai;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
@@ -31,6 +36,11 @@ import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.completions.CompletionUsage;
+import com.openai.models.files.FileCreateParams;
+import com.openai.models.files.FilePurpose;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * {@link ProviderAdapter} for OpenAI, built on the official {@code openai-java} SDK.
@@ -42,12 +52,29 @@ import com.openai.models.completions.CompletionUsage;
  * entry is sent as a plain user-role message rather than a native tool-result message;
  * {@code Response.generatedFiles} is left empty, since nothing in a plain chat-completions
  * request causes the model to produce a file.
+ *
+ * <p>Repeated-attachment optimization — documents only, not images: a non-image attachment is
+ * opportunistically uploaded once via OpenAI's Files API ({@code purpose=user_data}) and
+ * referenced by file id on every subsequent call whose attachment has byte-identical content,
+ * instead of re-embedding and re-transmitting the same base64 payload on every turn. The Chat
+ * Completions API has no equivalent for images — {@code image_url} only ever accepts a URL or an
+ * inline data URI, never a file id — so image attachments always re-embed inline exactly as
+ * before; this is a real capability gap in the API, not an oversight here. The upload cache is
+ * keyed by a content hash ({@code mediaType} + bytes) and scoped to this adapter instance, never
+ * shared across providers or instances. It's a pure optimization, never a correctness dependency:
+ * an upload failure (network blip, permissions, size limits) falls back to full inline embedding
+ * for that one attempt without being cached, so the next call retries the upload rather than
+ * giving up on it permanently. The cache has no eviction or TTL, so a very long-lived adapter
+ * instance juggling a very large number of distinct document attachments will grow it
+ * unboundedly — fine for the common case, worth knowing for a long-lived, high-cardinality server.
  */
 public final class OpenAiAdapter implements ProviderAdapter {
 
+    private static final Logger log = LoggerFactory.getLogger(OpenAiAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
 
     private final OpenAIClient client;
+    private final Map<String, String> uploadedFileIdsByContentHash = new ConcurrentHashMap<>();
 
     /** Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's null/blank. */
     public OpenAiAdapter(String apiKey) {
@@ -195,22 +222,72 @@ public final class OpenAiAdapter implements ProviderAdapter {
         return builder.build();
     }
 
-    private static ChatCompletionContentPart toContentPart(Attachment attachment) {
-        String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
+    private ChatCompletionContentPart toContentPart(Attachment attachment) {
         String mediaType = attachment.getMediaType();
         if (mediaType != null && mediaType.startsWith("image/")) {
+            // No file-reference path exists for images in Chat Completions — always inline. See class javadoc.
+            String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
             return ChatCompletionContentPart.ofImageUrl(ChatCompletionContentPartImage.builder()
                     .imageUrl(ChatCompletionContentPartImage.ImageUrl.builder()
                             .url("data:" + mediaType + ";base64," + base64Data)
                             .build())
                     .build());
         }
+
+        String filename = attachment.getFilename() == null ? "attachment" : attachment.getFilename();
+        String fileId = uploadOrReuseFileId(attachment);
+        if (fileId != null) {
+            return ChatCompletionContentPart.ofFile(ChatCompletionContentPart.File.builder()
+                    .file(ChatCompletionContentPart.File.FileObject.builder()
+                            .fileId(fileId)
+                            .filename(filename)
+                            .build())
+                    .build());
+        }
+
+        // Files API upload unavailable or failed for this attempt — fall back to full inline embedding.
+        String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
         return ChatCompletionContentPart.ofFile(ChatCompletionContentPart.File.builder()
                 .file(ChatCompletionContentPart.File.FileObject.builder()
                         .fileData("data:" + mediaType + ";base64," + base64Data)
-                        .filename(attachment.getFilename() == null ? "attachment" : attachment.getFilename())
+                        .filename(filename)
                         .build())
                 .build());
+    }
+
+    /**
+     * Uploads {@code attachment} via the Files API on first sight of its exact content, caching
+     * the resulting file id by content hash so byte-identical attachments on later calls skip the
+     * upload and the base64 re-embedding entirely — see the class-level javadoc. Returns
+     * {@code null} (never throws) if the upload itself fails, so the caller can fall back to
+     * inline embedding for this one attempt instead of failing the whole request over what is
+     * purely an optimization.
+     */
+    private String uploadOrReuseFileId(Attachment attachment) {
+        String contentHash = contentHash(attachment);
+        return uploadedFileIdsByContentHash.computeIfAbsent(contentHash, key -> {
+            try {
+                return client.files()
+                        .create(FileCreateParams.builder().file(attachment.getData()).purpose(FilePurpose.USER_DATA).build())
+                        .id();
+            } catch (RuntimeException e) {
+                log.warn("Attachment upload to OpenAI Files API failed; falling back to inline embedding "
+                        + "for this attempt: {}", e.getMessage());
+                return null;
+            }
+        });
+    }
+
+    private static String contentHash(Attachment attachment) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(String.valueOf(attachment.getMediaType()).getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            digest.update(attachment.getData());
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     private Response fromCompletion(ChatCompletion completion) {

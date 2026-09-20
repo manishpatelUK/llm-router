@@ -2,6 +2,8 @@ package com.manishpateluk.llmrouter.provider.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
@@ -9,20 +11,25 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
+import com.manishpateluk.llmrouter.model.Attachment;
 import com.manishpateluk.llmrouter.model.Request;
 import com.manishpateluk.llmrouter.model.Response;
 import com.manishpateluk.llmrouter.provider.Provider;
 import com.openai.client.OpenAIClient;
 import com.openai.client.OpenAIClientAsync;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionContentPart;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.completions.CompletionUsage;
+import com.openai.models.files.FileCreateParams;
+import com.openai.models.files.FileObject;
 import com.openai.services.async.ChatServiceAsync;
 import com.openai.services.async.chat.ChatCompletionServiceAsync;
 import com.openai.services.blocking.ChatService;
+import com.openai.services.blocking.FileService;
 import com.openai.services.blocking.chat.ChatCompletionService;
 
 import org.junit.jupiter.api.Test;
@@ -40,6 +47,8 @@ class OpenAiAdapterTest {
     private ChatService chatService;
     @Mock
     private com.openai.services.blocking.chat.ChatCompletionService completionService;
+    @Mock
+    private FileService fileService;
     @Mock
     private OpenAIClientAsync asyncClient;
     @Mock
@@ -113,6 +122,102 @@ class OpenAiAdapterTest {
         assertThat(response.getToolCalls()).hasSize(1);
         assertThat(response.getToolCalls().get(0).getName()).isEqualTo("lookup");
         assertThat(response.getToolCalls().get(0).getArguments()).containsEntry("query", "weather");
+    }
+
+    @Test
+    void sendUploadsDocumentAttachmentOnceAndReusesFileIdOnByteIdenticalRepeat() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        when(client.files()).thenReturn(fileService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+        when(fileService.create(any(FileCreateParams.class))).thenReturn(fixtureFileObject("file_abc"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        Attachment attachment = Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).build();
+        Request request = Request.builder().prompt("summarize").attachments(List.of(attachment)).build();
+
+        adapter.send("gpt-6-astra", request);
+        adapter.send("gpt-6-astra", request);
+
+        verify(fileService, times(1)).create(any(FileCreateParams.class));
+
+        for (ChatCompletionCreateParams sent : captor.getAllValues()) {
+            ChatCompletionContentPart.File file = firstContentPart(sent).asFile();
+            assertThat(file.file().fileId()).contains("file_abc");
+            assertThat(file.file().fileData()).isEmpty();
+        }
+    }
+
+    @Test
+    void sendUploadsSeparateFileForDifferentAttachmentContent() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        when(client.files()).thenReturn(fileService);
+        when(completionService.create(any(ChatCompletionCreateParams.class))).thenReturn(textCompletion("ok"));
+        when(fileService.create(any(FileCreateParams.class)))
+                .thenReturn(fixtureFileObject("file_one"))
+                .thenReturn(fixtureFileObject("file_two"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder().prompt("p")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1}).build()))
+                .build());
+        adapter.send("gpt-6-astra", Request.builder().prompt("p")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{2}).build()))
+                .build());
+
+        verify(fileService, times(2)).create(any(FileCreateParams.class));
+    }
+
+    @Test
+    void sendFallsBackToInlineEmbeddingWhenUploadFails() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        when(client.files()).thenReturn(fileService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+        when(fileService.create(any(FileCreateParams.class))).thenThrow(new RuntimeException("quota exceeded"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        Response response = adapter.send("gpt-6-astra", Request.builder().prompt("summarize")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).build()))
+                .build());
+
+        assertThat(response.getContent()).isEqualTo("ok"); // upload failure doesn't fail the call
+        ChatCompletionContentPart.File file = firstContentPart(captor.getValue()).asFile();
+        assertThat(file.file().fileData()).isPresent();
+        assertThat(file.file().fileId()).isEmpty();
+    }
+
+    @Test
+    void imageAttachmentsAlwaysStayInlineEvenWithFilesApiAvailable() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder().prompt("describe this")
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1, 2, 3}).build()))
+                .build());
+
+        assertThat(firstContentPart(captor.getValue()).isImageUrl()).isTrue();
+    }
+
+    private static ChatCompletionContentPart firstContentPart(ChatCompletionCreateParams sent) {
+        return sent.messages().get(sent.messages().size() - 1).asUser().content().asArrayOfContentParts().get(0);
+    }
+
+    private static FileObject fixtureFileObject(String id) {
+        return FileObject.builder()
+                .id(id)
+                .bytes(3)
+                .createdAt(0)
+                .filename("attachment")
+                .purpose(FileObject.Purpose.USER_DATA)
+                .status(FileObject.Status.PROCESSED)
+                .build();
     }
 
     @Test

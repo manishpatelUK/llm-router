@@ -1,17 +1,24 @@
 package com.manishpateluk.llmrouter.provider.anthropic;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.JsonValue;
+import com.anthropic.models.files.FileUploadParams;
 import com.anthropic.models.messages.Base64ImageSource;
 import com.anthropic.models.messages.Base64PdfSource;
+import com.anthropic.models.messages.CacheControlEphemeral;
 import com.anthropic.models.messages.ContentBlock;
 import com.anthropic.models.messages.ContentBlockParam;
 import com.anthropic.models.messages.DocumentBlockParam;
@@ -33,6 +40,9 @@ import com.manishpateluk.llmrouter.model.ToolDefinition;
 import com.manishpateluk.llmrouter.provider.Provider;
 import com.manishpateluk.llmrouter.provider.ProviderAdapter;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * {@link ProviderAdapter} for Anthropic (Claude), built on the official {@code anthropic-java}
  * SDK. {@link #sendAsync} uses the SDK's own {@code client.async()} view, which is genuinely
@@ -45,12 +55,32 @@ import com.manishpateluk.llmrouter.provider.ProviderAdapter;
  * media types are not yet mapped; {@code Response.generatedFiles} is left empty, since nothing
  * in a plain request causes Claude to produce a file without the caller also requesting a
  * code-execution-capable tool, which this adapter doesn't add implicitly.
+ *
+ * <p>Repeated-attachment optimization: an attachment is opportunistically uploaded once via
+ * Anthropic's Files API and referenced by file id on every subsequent call whose attachment has
+ * byte-identical content — instead of re-embedding and re-transmitting the same base64 payload
+ * on every turn of a multi-turn conversation. The upload cache is keyed by a content hash
+ * ({@code mediaType} + bytes) and scoped to this adapter instance — it is never shared across
+ * providers or across separate {@code AnthropicAdapter} instances, so this can't leak a stale
+ * reference into a fallback attempt on a different provider. Every attachment content block also
+ * gets an ephemeral {@code cache_control} hint (whether sent by file reference or inline), which
+ * is free to set and helps Anthropic reuse the surrounding prompt prefix cheaply within its
+ * caching window. This is a pure optimization, never a correctness dependency: if the upload call
+ * itself fails for any reason (network blip, permissions, size limits), that one attachment
+ * transparently falls back to full inline embedding for the current attempt, and the failure is
+ * not cached — the next call retries the upload rather than giving up on the optimization
+ * permanently. The cache itself has no eviction or TTL, so an adapter instance that lives a very
+ * long time and sees a very large number of distinct attachments will grow it unboundedly; fine
+ * for the common case (one adapter instance serving one, or a modest number of, conversations)
+ * but worth knowing for a long-lived, high-attachment-cardinality server process.
  */
 public final class AnthropicAdapter implements ProviderAdapter {
 
+    private static final Logger log = LoggerFactory.getLogger(AnthropicAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
 
     private final AnthropicClient client;
+    private final Map<String, String> uploadedFileIdsByContentHash = new ConcurrentHashMap<>();
 
     /** Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's null/blank. */
     public AnthropicAdapter(String apiKey) {
@@ -198,20 +228,66 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return schema.build();
     }
 
-    private static ContentBlockParam toContentBlockParam(Attachment attachment) {
-        String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
+    private ContentBlockParam toContentBlockParam(Attachment attachment) {
         String mediaType = attachment.getMediaType();
-        if (mediaType != null && mediaType.startsWith("image/")) {
+        boolean isImage = mediaType != null && mediaType.startsWith("image/");
+        CacheControlEphemeral cacheControl = CacheControlEphemeral.builder().build();
+
+        String fileId = uploadOrReuseFileId(attachment);
+        if (fileId != null) {
+            return isImage
+                    ? ContentBlockParam.ofImage(ImageBlockParam.builder().fileSource(fileId).cacheControl(cacheControl).build())
+                    : ContentBlockParam.ofDocument(DocumentBlockParam.builder().fileSource(fileId).cacheControl(cacheControl).build());
+        }
+
+        // Files API upload unavailable or failed for this attempt — fall back to full inline embedding.
+        String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
+        if (isImage) {
             return ContentBlockParam.ofImage(ImageBlockParam.builder()
                     .source(Base64ImageSource.builder()
                             .mediaType(Base64ImageSource.MediaType.of(mediaType))
                             .data(base64Data)
                             .build())
+                    .cacheControl(cacheControl)
                     .build());
         }
         return ContentBlockParam.ofDocument(DocumentBlockParam.builder()
                 .source(Base64PdfSource.builder().data(base64Data).build())
+                .cacheControl(cacheControl)
                 .build());
+    }
+
+    /**
+     * Uploads {@code attachment} via the Files API on first sight of its exact content, caching
+     * the resulting file id by content hash so byte-identical attachments on later calls skip the
+     * upload and the base64 re-embedding entirely — see the class-level javadoc. Returns
+     * {@code null} (never throws) if the upload itself fails, so the caller can fall back to
+     * inline embedding for this one attempt instead of failing the whole request over what is
+     * purely an optimization.
+     */
+    private String uploadOrReuseFileId(Attachment attachment) {
+        String contentHash = contentHash(attachment);
+        return uploadedFileIdsByContentHash.computeIfAbsent(contentHash, key -> {
+            try {
+                return client.files().upload(FileUploadParams.builder().file(attachment.getData()).build()).id();
+            } catch (RuntimeException e) {
+                log.warn("Attachment upload to Anthropic Files API failed; falling back to inline embedding "
+                        + "for this attempt: {}", e.getMessage());
+                return null;
+            }
+        });
+    }
+
+    private static String contentHash(Attachment attachment) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(String.valueOf(attachment.getMediaType()).getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            digest.update(attachment.getData());
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     private Response fromMessage(Message message) {
