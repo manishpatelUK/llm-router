@@ -28,7 +28,9 @@ import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.OutputConfig;
 import com.anthropic.models.messages.Tool;
+import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
+import com.anthropic.models.messages.ToolUseBlockParam;
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
 import com.manishpateluk.llmrouter.model.Attachment;
@@ -48,11 +50,12 @@ import org.slf4j.LoggerFactory;
  * SDK. {@link #sendAsync} uses the SDK's own {@code client.async()} view, which is genuinely
  * non-blocking — not the interface's thread-pool fallback.
  *
- * <p>Known scope limits (documented rather than silently guessed at): the unified
- * {@code Message} history shape (§3) carries no tool-call id, so a {@code TOOL}-role history
- * entry is sent as a plain user-role message rather than a native {@code tool_result} block;
- * non-image attachments are sent as PDF documents (the well-documented case) — other document
- * media types are not yet mapped; {@code Response.generatedFiles} is left empty, since nothing
+ * <p>Known scope limits (documented rather than silently guessed at): a history turn is sent
+ * using Anthropic's native {@code tool_use}/{@code tool_result} content blocks only when the
+ * caller populated {@code Message.toolCalls}/{@code toolCallId} (§3); without those, a {@code
+ * TOOL}-role history entry falls back to a plain user-role message instead. Non-image attachments
+ * are sent as PDF documents (the well-documented case) — other document media types are not yet
+ * mapped; {@code Response.generatedFiles} is left empty, since nothing
  * in a plain request causes Claude to produce a file without the caller also requesting a
  * code-execution-capable tool, which this adapter doesn't add implicitly.
  *
@@ -141,9 +144,9 @@ public final class AnthropicAdapter implements ProviderAdapter {
         for (var message : request.getHistory()) {
             switch (message.getRole()) {
                 case USER -> builder.addUserMessage(message.getContent());
-                case ASSISTANT -> builder.addAssistantMessage(message.getContent());
+                case ASSISTANT -> addAssistantMessage(builder, message);
                 case SYSTEM -> { /* folded into system instructions above */ }
-                case TOOL -> builder.addUserMessage("Tool result: " + message.getContent());
+                case TOOL -> addToolResultMessage(builder, message);
             }
         }
 
@@ -169,6 +172,57 @@ public final class AnthropicAdapter implements ProviderAdapter {
         }
 
         return builder.build();
+    }
+
+    /**
+     * Sends {@code message} as a native assistant turn: a text block (if it has non-blank
+     * content) followed by one {@code tool_use} block per requested call. Falls back to a plain
+     * assistant text message when {@code toolCalls} is empty (the common, no-tool-call case).
+     */
+    private static void addAssistantMessage(MessageCreateParams.Builder builder, com.manishpateluk.llmrouter.model.Message message) {
+        if (message.getToolCalls().isEmpty()) {
+            builder.addAssistantMessage(message.getContent());
+            return;
+        }
+
+        List<ContentBlockParam> blocks = new ArrayList<>();
+        if (message.getContent() != null && !message.getContent().isBlank()) {
+            blocks.add(ContentBlockParam.ofText(message.getContent()));
+        }
+        for (ToolCall call : message.getToolCalls()) {
+            blocks.add(ContentBlockParam.ofToolUse(ToolUseBlockParam.builder()
+                    .id(call.getId())
+                    .name(call.getName())
+                    .input(toToolUseInput(call.getArguments()))
+                    .build()));
+        }
+        builder.addAssistantMessageOfBlockParams(blocks);
+    }
+
+    /**
+     * Sends {@code message} as a native {@code tool_result} block — as a user-role message, per
+     * Anthropic's own convention — when it carries a {@code toolCallId}; otherwise falls back to
+     * a plain flattened user message, exactly as before this correlation support existed.
+     */
+    private static void addToolResultMessage(MessageCreateParams.Builder builder, com.manishpateluk.llmrouter.model.Message message) {
+        if (message.getToolCallId() == null) {
+            builder.addUserMessage("Tool result: " + message.getContent());
+            return;
+        }
+        builder.addUserMessageOfBlockParams(List.of(ContentBlockParam.ofToolResult(ToolResultBlockParam.builder()
+                .toolUseId(message.getToolCallId())
+                .content(message.getContent())
+                .build())));
+    }
+
+    private static ToolUseBlockParam.Input toToolUseInput(Map<String, Object> arguments) {
+        ToolUseBlockParam.Input.Builder input = ToolUseBlockParam.Input.builder();
+        if (arguments != null) {
+            for (Map.Entry<String, Object> entry : arguments.entrySet()) {
+                input.putAdditionalProperty(entry.getKey(), JsonValue.from(entry.getValue()));
+            }
+        }
+        return input.build();
     }
 
     private static String buildSystemInstructions(Request request) {

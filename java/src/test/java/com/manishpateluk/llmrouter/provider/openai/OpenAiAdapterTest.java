@@ -14,15 +14,19 @@ import java.util.concurrent.CompletableFuture;
 import com.manishpateluk.llmrouter.model.Attachment;
 import com.manishpateluk.llmrouter.model.Request;
 import com.manishpateluk.llmrouter.model.Response;
+import com.manishpateluk.llmrouter.model.ToolCall;
 import com.manishpateluk.llmrouter.provider.Provider;
 import com.openai.client.OpenAIClient;
 import com.openai.client.OpenAIClientAsync;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionContentPart;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
+import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
+import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.openai.models.completions.CompletionUsage;
 import com.openai.models.files.FileCreateParams;
 import com.openai.models.files.FileObject;
@@ -203,6 +207,61 @@ class OpenAiAdapterTest {
                 .build());
 
         assertThat(firstContentPart(captor.getValue()).isImageUrl()).isTrue();
+    }
+
+    @Test
+    void sendCorrelatesMultipleToolCallsNatively() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+
+        ToolCall callA = ToolCall.builder().id("call_a").name("lookup").arguments(Map.of("query", "weather")).build();
+        ToolCall callB = ToolCall.builder().id("call_b").name("convert").arguments(Map.of("amount", 5)).build();
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder()
+                .prompt("continue")
+                .history(List.of(
+                        com.manishpateluk.llmrouter.model.Message.assistant("", List.of(callA, callB)),
+                        com.manishpateluk.llmrouter.model.Message.tool("call_a", "sunny"),
+                        com.manishpateluk.llmrouter.model.Message.tool("call_b", "5 miles")))
+                .build());
+
+        List<ChatCompletionMessageParam> sent = captor.getValue().messages();
+        assertThat(sent).hasSize(4); // assistant tool-calls turn + 2 tool-result turns + final prompt
+
+        ChatCompletionAssistantMessageParam assistantTurn = sent.get(0).asAssistant();
+        List<ChatCompletionMessageToolCall> toolCalls = assistantTurn.toolCalls().orElseThrow();
+        assertThat(toolCalls).hasSize(2);
+        assertThat(toolCalls.get(0).asFunction().id()).isEqualTo("call_a");
+        assertThat(toolCalls.get(0).asFunction().function().name()).isEqualTo("lookup");
+        assertThat(toolCalls.get(1).asFunction().id()).isEqualTo("call_b");
+
+        ChatCompletionToolMessageParam toolResultA = sent.get(1).asTool();
+        assertThat(toolResultA.toolCallId()).isEqualTo("call_a");
+        assertThat(toolResultA.content().asText()).isEqualTo("sunny");
+
+        ChatCompletionToolMessageParam toolResultB = sent.get(2).asTool();
+        assertThat(toolResultB.toolCallId()).isEqualTo("call_b");
+        assertThat(toolResultB.content().asText()).isEqualTo("5 miles");
+    }
+
+    @Test
+    void sendFlattensALegacyToolMessageWithNoCorrelationId() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder()
+                .prompt("continue")
+                .history(List.of(com.manishpateluk.llmrouter.model.Message.tool("legacy result")))
+                .build());
+
+        assertThat(captor.getValue().messages().get(0).asUser().content().asText())
+                .isEqualTo("Tool result: legacy result");
     }
 
     private static ChatCompletionContentPart firstContentPart(ChatCompletionCreateParams sent) {

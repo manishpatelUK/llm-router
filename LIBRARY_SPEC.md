@@ -35,7 +35,12 @@ Every call ultimately builds one **Request** object. Language implementations sh
 ```
 Request {
   prompt: string                       // required — the latest user message
-  history: Message[]?                  // optional prior turns: { role: "user"|"assistant"|"system"|"tool", content } — role values per §12.5
+  history: Message[]?                  // optional prior turns: { role: "user"|"assistant"|"system"|"tool", content,
+                                        // toolCalls?, toolCallId? } — role values per §12.5. toolCalls (ASSISTANT
+                                        // only) and toolCallId (TOOL only) are optional correlation fields: when
+                                        // present, the adapter sends the turn using the provider's native
+                                        // tool-call/tool-result wire format; when absent, it falls back to a plain
+                                        // flattened text turn (e.g. "Tool result: " + content) for that entry.
   systemInstructions: string?          // optional system/developer prompt
   responseSchema: Schema?              // optional structured-output schema (JSON-Schema-like)
   tools: ToolDefinition[]?             // optional tool/function definitions the model may call

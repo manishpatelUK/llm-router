@@ -31,6 +31,7 @@ import com.anthropic.services.blocking.MessageService;
 import com.manishpateluk.llmrouter.model.Attachment;
 import com.manishpateluk.llmrouter.model.Request;
 import com.manishpateluk.llmrouter.model.Response;
+import com.manishpateluk.llmrouter.model.ToolCall;
 import com.manishpateluk.llmrouter.provider.Provider;
 
 import org.junit.jupiter.api.Test;
@@ -213,6 +214,65 @@ class AnthropicAdapterTest {
         ImageBlockParam image = firstContentBlock(captor.getValue()).asImage();
         assertThat(image.source().isBase64()).isTrue();
         assertThat(image.cacheControl()).isPresent(); // cache_control still set on the inline fallback
+    }
+
+    @Test
+    void sendCorrelatesMultipleToolCallsNatively() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+
+        ToolCall callA = ToolCall.builder().id("call_a").name("lookup").arguments(Map.of("query", "weather")).build();
+        ToolCall callB = ToolCall.builder().id("call_b").name("convert").arguments(Map.of("amount", 5)).build();
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5", Request.builder()
+                .prompt("continue")
+                .history(List.of(
+                        com.manishpateluk.llmrouter.model.Message.assistant("", List.of(callA, callB)),
+                        com.manishpateluk.llmrouter.model.Message.tool("call_a", "sunny"),
+                        com.manishpateluk.llmrouter.model.Message.tool("call_b", "5 miles")))
+                .build());
+
+        List<MessageParam> sent = captor.getValue().messages();
+        assertThat(sent).hasSize(4); // assistant tool_use turn + 2 tool_result turns + final prompt
+
+        MessageParam assistantTurn = sent.get(0);
+        assertThat(assistantTurn.role()).isEqualTo(com.anthropic.models.messages.MessageParam.Role.ASSISTANT);
+        List<ContentBlockParam> assistantBlocks = assistantTurn.content().asBlockParams();
+        assertThat(assistantBlocks).hasSize(2);
+        assertThat(assistantBlocks.get(0).asToolUse().id()).isEqualTo("call_a");
+        assertThat(assistantBlocks.get(0).asToolUse().name()).isEqualTo("lookup");
+        assertThat(assistantBlocks.get(1).asToolUse().id()).isEqualTo("call_b");
+
+        MessageParam toolResultA = sent.get(1);
+        assertThat(toolResultA.role()).isEqualTo(com.anthropic.models.messages.MessageParam.Role.USER);
+        ContentBlockParam toolResultBlockA = toolResultA.content().asBlockParams().get(0);
+        assertThat(toolResultBlockA.isToolResult()).isTrue();
+        assertThat(toolResultBlockA.asToolResult().toolUseId()).isEqualTo("call_a");
+        assertThat(toolResultBlockA.asToolResult().content().get().asString()).isEqualTo("sunny");
+
+        MessageParam toolResultB = sent.get(2);
+        ContentBlockParam toolResultBlockB = toolResultB.content().asBlockParams().get(0);
+        assertThat(toolResultBlockB.asToolResult().toolUseId()).isEqualTo("call_b");
+        assertThat(toolResultBlockB.asToolResult().content().get().asString()).isEqualTo("5 miles");
+    }
+
+    @Test
+    void sendFlattensALegacyToolMessageWithNoCorrelationId() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5", Request.builder()
+                .prompt("continue")
+                .history(List.of(com.manishpateluk.llmrouter.model.Message.tool("legacy result")))
+                .build());
+
+        MessageParam toolTurn = captor.getValue().messages().get(0);
+        assertThat(toolTurn.role()).isEqualTo(com.anthropic.models.messages.MessageParam.Role.USER);
+        assertThat(toolTurn.content().asString()).isEqualTo("Tool result: legacy result");
     }
 
     private static ContentBlockParam firstContentBlock(MessageCreateParams sent) {

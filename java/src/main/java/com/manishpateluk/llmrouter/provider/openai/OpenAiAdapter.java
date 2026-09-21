@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
 import com.manishpateluk.llmrouter.model.Attachment;
@@ -28,6 +29,7 @@ import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.ResponseFormatJsonSchema;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionContentPart;
 import com.openai.models.chat.completions.ChatCompletionContentPartImage;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
@@ -35,6 +37,7 @@ import com.openai.models.chat.completions.ChatCompletionFunctionTool;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
+import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.openai.models.completions.CompletionUsage;
 import com.openai.models.files.FileCreateParams;
 import com.openai.models.files.FilePurpose;
@@ -47,11 +50,11 @@ import org.slf4j.LoggerFactory;
  * {@link #sendAsync} uses the SDK's own {@code client.async()} view, which is genuinely
  * non-blocking — not the interface's thread-pool fallback.
  *
- * <p>Known scope limits (documented rather than silently guessed at): the unified
- * {@code Message} history shape (§3) carries no tool-call id, so a {@code TOOL}-role history
- * entry is sent as a plain user-role message rather than a native tool-result message;
- * {@code Response.generatedFiles} is left empty, since nothing in a plain chat-completions
- * request causes the model to produce a file.
+ * <p>Known scope limits (documented rather than silently guessed at): a history turn is sent
+ * using native {@code tool_calls}/a {@code tool}-role message only when the caller populated
+ * {@code Message.toolCalls}/{@code toolCallId} (§3); without those, a {@code TOOL}-role history
+ * entry falls back to a plain user-role message instead. {@code Response.generatedFiles} is left
+ * empty, since nothing in a plain chat-completions request causes the model to produce a file.
  *
  * <p>Repeated-attachment optimization — documents only, not images: a non-image attachment is
  * opportunistically uploaded once via OpenAI's Files API ({@code purpose=user_data}) and
@@ -72,6 +75,7 @@ public final class OpenAiAdapter implements ProviderAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final OpenAIClient client;
     private final Map<String, String> uploadedFileIdsByContentHash = new ConcurrentHashMap<>();
@@ -135,9 +139,9 @@ public final class OpenAiAdapter implements ProviderAdapter {
         for (var message : request.getHistory()) {
             switch (message.getRole()) {
                 case USER -> builder.addUserMessage(message.getContent());
-                case ASSISTANT -> builder.addAssistantMessage(message.getContent());
+                case ASSISTANT -> addAssistantMessage(builder, message);
                 case SYSTEM -> { /* folded into system instructions above */ }
-                case TOOL -> builder.addUserMessage("Tool result: " + message.getContent());
+                case TOOL -> addToolResultMessage(builder, message);
             }
         }
 
@@ -169,6 +173,55 @@ public final class OpenAiAdapter implements ProviderAdapter {
         }
 
         return builder.build();
+    }
+
+    /**
+     * Sends {@code message} as a native assistant turn carrying one OpenAI function tool call
+     * per requested call. Falls back to a plain assistant text message when {@code toolCalls} is
+     * empty (the common, no-tool-call case).
+     */
+    private static void addAssistantMessage(ChatCompletionCreateParams.Builder builder, com.manishpateluk.llmrouter.model.Message message) {
+        if (message.getToolCalls().isEmpty()) {
+            builder.addAssistantMessage(message.getContent());
+            return;
+        }
+
+        ChatCompletionAssistantMessageParam.Builder assistant =
+                ChatCompletionAssistantMessageParam.builder().content(message.getContent());
+        for (ToolCall call : message.getToolCalls()) {
+            assistant.addToolCall(ChatCompletionMessageFunctionToolCall.builder()
+                    .id(call.getId())
+                    .function(ChatCompletionMessageFunctionToolCall.Function.builder()
+                            .name(call.getName())
+                            .arguments(toArgumentsJson(call.getArguments()))
+                            .build())
+                    .build());
+        }
+        builder.addMessage(assistant.build());
+    }
+
+    /**
+     * Sends {@code message} as a native {@code tool}-role message when it carries a {@code
+     * toolCallId}; otherwise falls back to a plain flattened user message, exactly as before this
+     * correlation support existed.
+     */
+    private static void addToolResultMessage(ChatCompletionCreateParams.Builder builder, com.manishpateluk.llmrouter.model.Message message) {
+        if (message.getToolCallId() == null) {
+            builder.addUserMessage("Tool result: " + message.getContent());
+            return;
+        }
+        builder.addMessage(ChatCompletionToolMessageParam.builder()
+                .toolCallId(message.getToolCallId())
+                .content(message.getContent())
+                .build());
+    }
+
+    private static String toArgumentsJson(Map<String, Object> arguments) {
+        try {
+            return JSON.writeValueAsString(arguments == null ? Map.of() : arguments);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize tool call arguments", e);
+        }
     }
 
     private static String buildSystemInstructions(Request request) {
