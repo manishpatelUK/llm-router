@@ -80,6 +80,48 @@ class RouteResolverTest {
     }
 
     @Test
+    void eligibleFilterNarrowsProviderOnlyExpansionBeforeTheHeuristicRuns() {
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC)))
+                .thinkingLevel(ThinkingLevel.MAX)
+                .build();
+
+        List<RouteEntry> resolved = RouteResolver.resolve(config, 0, NO_PROVIDERS,
+                model -> !model.getModel().equals("claude-fable-5-1"));
+
+        assertThat(resolved).containsExactly(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"));
+    }
+
+    @Test
+    void eligibleFilterAppliesToTheCostOptimizedQualifyingSet() {
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC)))
+                .thinkingLevel(ThinkingLevel.LOW)
+                .costOptimized(true)
+                .build();
+        List<RouteEntry> unfiltered = RouteResolver.resolve(config, 1_000, NO_PROVIDERS);
+        assertThat(unfiltered).hasSizeGreaterThan(1);
+        String cheapest = unfiltered.get(0).getModel();
+
+        List<RouteEntry> resolved = RouteResolver.resolve(config, 1_000, NO_PROVIDERS,
+                model -> !model.getModel().equals(cheapest));
+
+        assertThat(resolved).isNotEmpty().noneMatch(entry -> cheapest.equals(entry.getModel()));
+    }
+
+    @Test
+    void providerOnlyEntryWithNoEligibleModelIsReturnedUnexpanded() {
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.PERPLEXITY), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        List<RouteEntry> resolved = RouteResolver.resolve(config, 0, NO_PROVIDERS, model -> false);
+
+        // explicit entries are never filtered here — the router checks those per attempt
+        assertThat(resolved).containsExactly(RouteEntry.of(Provider.PERPLEXITY), RouteEntry.of(Provider.OPENAI, "gpt-6-astra"));
+    }
+
+    @Test
     void mixedRoutePreservesOrderAndExpandsOnlyProviderOnlyEntries() {
         RouterConfig config = RouterConfig.builder()
                 .route(List.of(

@@ -67,6 +67,18 @@ Attachment {
 
 The router does **not** execute tool calls itself — it only requests them from the model and returns them to the caller to execute. This keeps the library side-effect-free and embeddable in any application architecture.
 
+### 3.1 Tool definition validation
+
+Before routing — and so before any network call — the router validates `tools` against rules every supported provider enforces, and rejects the whole request with an `INVALID_REQUEST` error (§10, §12.8) if any are violated:
+
+- `name` must match `^[a-zA-Z0-9_-]{1,64}$`.
+- `name` must be unique within the request's `tools`.
+- `parameters` must be a JSON Schema object: non-null, with `"type": "object"`. A tool that takes no arguments uses `{ "type": "object" }`.
+
+The error message should list every violation (not just the first), identifying each tool by index and name. Without this check, a bad definition fails as a provider 400 on every candidate in turn, which is slow, costs a request per candidate, and surfaces only as an opaque exhaustion.
+
+Schema keywords that some providers handle inconsistently (`oneOf`, `anyOf`, `$ref`) are deliberately **not** rejected or rewritten: every provider this library currently targets accepts them in tool parameters, and the Model Capability Table has no per-model flag to say otherwise. If a provider that rejects them is added, the right shape is a new capability flag plus negotiation (§4), not a blanket validation error.
+
 ### Response shape
 
 Implementations should try and fill in as much of the shape as possible, and omit if not possible.
@@ -125,6 +137,8 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 
 Separately, `Response.generatedFiles` is only ever populated when `ModelEntry.supportsFileOutput` is true for the model that served the request — this isn't something a caller requests per-call (there's no matching `Request` field), it's a property of whether the chosen model/provider combination can produce downloadable files at all (e.g. via a code-execution or image-generation tool).
 
+Every "dropped" outcome in this table becomes a **skip** instead when the feature is listed in `RouterConfig.requiredFeatures` — see §5.4.
+
 This negotiation happens **per attempt**, not once — if the router falls back from a model that supports structured output to one that doesn't, the second attempt correctly drops it and reports that in `droppedFeatures`/`attempts`.
 
 `droppedFeatures` entries must use the exact canonical values in §12.7 (`"responseSchema"`, `"tools"`, `"attachments"`) — not a paraphrase or a differently-cased variant — so calling code can reliably branch on them regardless of which language implementation produced the response.
@@ -162,6 +176,7 @@ RouterConfig {
   structuredOutputStrategy: string? // "native" | "promptFallback" | "auto"; default "auto"
   temperature: number?              // optional sampling temperature; no default (provider's own default applies when omitted). Sent to the model only if the resolved candidate's ModelEntry.supportsTemperature is true (§4, §7.1) — otherwise omitted for that attempt and recorded in droppedFeatures. If topP is also set, temperature wins whenever the candidate supports both — see §4's mutual-exclusion note.
   topP: number?                     // optional nucleus-sampling (top-p) parameter; no default. Sent to the model only if the resolved candidate's ModelEntry.supportsTopP is true (§4, §7.1) — otherwise omitted for that attempt and recorded in droppedFeatures. If temperature is also set and the candidate supports both, topP is omitted instead — see §4's mutual-exclusion note.
+  requiredFeatures: string[]?       // features that must never be dropped — values per §12.9; default empty. See §5.4.
 }
 
 RouteEntry =
@@ -173,7 +188,7 @@ RouteEntry =
 
 ### 5.1 Routing & fallback
 
-`route` is an ordered list of candidates. The router tries each in order (after capability negotiation) until one succeeds. A candidate is skipped without being attempted (recorded as `"skipped"` in `attempts`) if no credentials are available for its provider.
+`route` is an ordered list of candidates. The router tries each in order (after capability negotiation) until one succeeds. A candidate is skipped without being attempted (recorded as `"skipped"` in `attempts`) if no credentials are available for its provider, or if it can't honor one of `requiredFeatures` (§5.4).
 
 Provider-only entries (`{ provider: "openai" }`) are expanded at call time into a specific model using the config's `thinkingLevel` and the Model Capability Table's selection heuristic (§7.2). Fully-specified entries (`{ provider, model }`) are used exactly as given, regardless of `thinkingLevel`.
 
@@ -190,6 +205,19 @@ If `RouterConfig.route` is omitted entirely (or no config is passed at all), the
 `costOptimized: true` changes how **provider-only route entries expand**, and how the **default route** expands: instead of picking a single model per provider via the thinking-level heuristic, the router gathers *all* models from that provider whose capability score qualifies for the requested `thinkingLevel` tier (§7.2) and orders them ascending by estimated cost (using the prompt's approximate token count against the Model Capability Table's per-token pricing), trying the cheapest qualifying model first.
 
 Fully-specified `{ provider, model }` entries are never reordered by cost — an explicit model choice is always honored as given. `costOptimized` only affects how ambiguity (provider-only entries, or the default route) is resolved. When `costOptimized` is absent or `false`, it has no effect on ordering at all.
+
+### 5.4 Required features
+
+By default, a feature a candidate can't support is dropped and the attempt goes ahead (§4). That's the right trade-off for a one-off prompt, but quietly fatal for, say, an agent loop whose control flow depends on its tools: without them the model carries on with no abilities. `requiredFeatures` lets a caller opt specific features out of dropping.
+
+- **What counts as unmet.** A required feature is unmet for a candidate exactly when §4 negotiation would record it in `droppedFeatures` for this request. So `responseSchema` honored via prompt-fallback (`structuredOutputStrategy` `"auto"` or `"promptFallback"`) counts as honored; to require native structured output, also set `structuredOutputStrategy: "native"`. A required feature the request doesn't actually use (e.g. `"tools"` required but `tools` empty) is trivially met.
+- **Fully-specified entries** whose model can't honor a required feature are skipped, not attempted, and recorded in `attempts` as `"skipped"` with a reason naming the unmet features (e.g. `model does not support required feature(s) [tools]`).
+- **Provider-only entries and the default route** expand only over the provider's models that can honor every required feature: the thinking-level heuristic (§7.2), and with `costOptimized` the qualifying set and cost ordering (§5.3), all run over that filtered lineup. If none of the provider's models qualify, the entry is recorded as `"skipped"` with a `null` model and a reason such as `no perplexity model supports required feature(s) [tools]`, rather than silently vanishing from `attempts`.
+- **Models missing from the capability table** have no data to check against, so, consistent with §4 sending their requests unadapted, they are attempted rather than skipped. Nothing is dropped for them either; an unsupported feature surfaces as a provider error and a normal failed attempt.
+- **Exhaustion.** If every candidate is skipped or fails, the router raises the normal `ROUTER_EXHAUSTED` error (§5.1.1); the skip reasons in `attempts` (and the error message) show which required features couldn't be met where. This applies to the default route too: when credentials exist but no available provider can meet the requirements, the result is exhaustion, not `NO_PROVIDERS_CONFIGURED`.
+- **Default.** An empty `requiredFeatures` (the default) leaves routing and negotiation exactly as described in §4–§5.3.
+
+Credential checks still come first: a candidate with no credentials is skipped with the usual `no API key detected` reason, whatever its capabilities.
 
 ---
 
@@ -344,6 +372,8 @@ No logging is mandatory-on by default beyond what the host application's logging
 | No provider credentials detected anywhere | Fail fast on first call with a configuration error explaining no providers are available. |
 | Config specifies a route but none of those providers have credentials | All entries skipped → treated as exhaustion (§5.1.1). |
 | A requested feature (schema/tools) isn't supported by the current candidate model | Not an error — adapt/drop per §4, continue the attempt, record in `droppedFeatures`. |
+| …and that feature is in `RouterConfig.requiredFeatures` | Not an error by itself — the candidate is skipped and recorded in `attempts` (§5.4); if no candidate qualifies, exhaustion (§5.1.1). |
+| A `ToolDefinition` breaks the §3.1 rules (bad name, duplicate name, non-object `parameters`) | Raise an `INVALID_REQUEST` error immediately at call time, before any provider is contacted, listing every violation. |
 | A provider call fails (network, rate limit, 4xx/5xx, timeout) | Not fatal — recorded as a failed attempt, router advances to next candidate. |
 | Every candidate fails or is skipped | Raise `RouterExhaustedError` (or language equivalent) containing the full `attempts` list. |
 | Malformed `RouterConfig` (e.g. invalid `thinkingLevel` value) | Raise a configuration error immediately at call time, not buried inside routing logic. |
@@ -415,3 +445,78 @@ Each condition in §10 that results in a raised error should expose a stable, ma
 | `ROUTER_EXHAUSTED` | Every candidate in the resolved route failed or was skipped (§5.1.1). |
 | `NO_PROVIDERS_CONFIGURED` | No provider credentials were detected anywhere at first use (§5.2, §10). |
 | `INVALID_CONFIG` | A malformed `RouterConfig` was supplied, e.g. an invalid `thinkingLevel` value (§10). |
+| `INVALID_REQUEST` | The `Request` itself is one every provider would refuse, e.g. a tool definition that breaks §3.1 (§10). |
+
+### 12.9 `requiredFeatures` entries
+
+`tools` | `responseSchema` | `attachments` — the subset of §12.7 that can be required (§5.4). Each is the same literal that would otherwise appear in `droppedFeatures`. `temperature` and `topP` are deliberately excluded: they're sampling preferences rather than capabilities a call depends on, and the §4 mutual-exclusion rule would make requiring both unsatisfiable.
+
+---
+
+## 13. Proposal (not implemented): provider-run tools
+
+> **Status: design only.** Nothing in this section is implemented in any language yet, and it is not part of the cross-language contract until it is. It exists so the shape can be agreed before an implementation commits to one.
+
+`ToolDefinition` (§3) describes a tool the **caller** runs: the model asks for it, the router returns the `ToolCall`, and the caller executes it. Providers also offer tools they run **themselves** within a single API call, such as web search, web fetch, and code execution (Anthropic's and OpenAI's hosted tools, for example). These can't be expressed today. They differ from caller-run tools in every respect the router cares about: the caller never sees a call to execute, the provider has to be told by a provider-specific, often versioned type identifier, availability varies per model, and results come back as content rather than as a request for the caller to act on.
+
+### 13.1 Requesting a provider-run tool
+
+A new, separate `Request` field, kept apart from `tools` so the two kinds can't be confused or name-clash:
+
+```
+Request {
+  ...
+  providerTools: ProviderTool[]?
+}
+
+ProviderTool {
+  type: string                         // canonical, provider-neutral ID, e.g. "webSearch" | "webFetch" | "codeExecution" (new §12 list)
+  options: object?                     // provider-neutral options the router knows how to map, e.g. { maxUses, allowedDomains, blockedDomains }
+  providerOptions: map<providerId, object>?  // escape hatch: passed verbatim to that provider's adapter only
+}
+```
+
+- The caller names a capability (`"webSearch"`), never a provider's wire identifier (e.g. a dated tool type string). Each adapter maps the canonical ID to its provider's current tool type, so a provider bumping its tool version is an adapter change, not a caller change.
+- Neutral `options` only covers settings with a clear equivalent across providers. Anything else goes in `providerOptions`, which an adapter ignores unless it's keyed to its own provider. This keeps the common case portable without blocking provider-specific tuning.
+- §3.1 validation extends naturally: `type` must be a known canonical ID, and appears at most once per request.
+
+### 13.2 Capability negotiation and fallback
+
+- **Capability data.** `ModelEntry` gains `providerTools: string[]`, the canonical IDs that model supports natively (§7.1). It is a list rather than a boolean per tool so new tool types don't need a schema change. Models with built-in, always-on search (e.g. Perplexity's Sonar models) are *not* listed as supporting `"webSearch"`: the caller can't switch that search on or off, so listing it would let negotiation claim to honor a request it isn't actually controlling. Routing to them for search stays an explicit route choice.
+- **Per-item dropping.** Unlike `attachments` (all-or-nothing, §4), provider tools are independent of each other, so each unsupported one is dropped individually. `droppedFeatures` records `"providerTools"` once (keeping §12.7's field-name granularity), and a new `Response.droppedProviderTools: string[]` lists exactly which canonical IDs were dropped.
+- **No emulation.** The router never substitutes its own implementation (it doesn't run a search on the caller's behalf). That would break the library's side-effect-free guarantee (§3), for the same reason prompt-based tool faking is ruled out in §4.
+- **Requiring them.** `"providerTools"` joins §12.9, so `requiredFeatures` can make candidates that lack any requested provider tool skip rather than drop, with the same skip/exhaustion semantics as §5.4. A finer-grained form (requiring `webSearch` but tolerating loss of `webFetch`) is deferred until there's a concrete need.
+- **Fallback.** Negotiation stays per attempt. Falling back from a provider that ran a tool to one that can't is handled exactly like any other dropped feature. Fallback never resumes a partly completed provider-side tool run: each attempt is a fresh call.
+- **Adapter prerequisites.** Some providers expose hosted tools only on a different API surface from the one an adapter currently uses (OpenAI's are on the Responses API rather than Chat Completions, for example). Supporting `providerTools` for such a provider means moving that adapter, and until then its table entries simply list no `providerTools`.
+
+### 13.3 Results in `Response`
+
+Provider-run activity is reported, never returned as a `ToolCall` (the caller must not try to execute it):
+
+```
+Response {
+  ...
+  providerToolResults: ProviderToolResult[]?
+  droppedProviderTools: string[]?
+}
+
+ProviderToolResult {
+  type: string                         // canonical ID, e.g. "webSearch"
+  input: object?                       // what the model asked for, e.g. { query } or { code }, when the provider exposes it
+  output: string?                      // text output, e.g. stdout for codeExecution, when provided
+  citations: Citation[]?               // { url, title?, citedText? } for search/fetch results the answer relies on
+  error: string?                       // provider-reported failure of this tool run (the overall response can still succeed)
+}
+```
+
+- `content` stays the model's final answer, with the model's own inline references left as-is. `citations` gives callers a structured, provider-neutral list without having to parse provider-specific annotation formats.
+- Files produced by `codeExecution` keep coming back through the existing `generatedFiles` (§3), which already anticipates this.
+- `original` still carries the raw provider blocks for anything the neutral shape doesn't capture.
+- **Cost.** Hosted tools are often billed per use on top of tokens. `Usage` gains `providerToolUses: map<type, int>`, and the capability table a per-tool unit price, so `estimatedCostUsd` stays meaningful.
+- **History.** Some providers expect their own tool blocks to be passed back verbatim on the next turn. `Message` (assistant role) gains an optional `providerToolResults`. When the next call goes to the same provider, the adapter can replay the blocks natively from the stored `original`. When it goes to a different provider, the turn is flattened to text, mirroring how `toolCalls`/`toolCallId` already degrade (§3).
+
+### 13.4 Open questions
+
+- Whether `options` should be validated per tool type up front (§3.1), or passed through with unknown keys ignored.
+- Whether `providerToolResults` should also stream incrementally, once streaming is in scope.
+- Whether `"providerTools"` in `requiredFeatures` needs per-type granularity from day one (see §13.2).

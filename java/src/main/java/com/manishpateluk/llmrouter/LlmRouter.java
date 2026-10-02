@@ -16,9 +16,11 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
+import com.manishpateluk.llmrouter.config.Feature;
 import com.manishpateluk.llmrouter.config.RouteEntry;
 import com.manishpateluk.llmrouter.config.RouterConfig;
 import com.manishpateluk.llmrouter.error.InvalidConfigException;
+import com.manishpateluk.llmrouter.error.InvalidRequestException;
 import com.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
 import com.manishpateluk.llmrouter.error.RouterExhaustedException;
 import com.manishpateluk.llmrouter.model.AttemptOutcome;
@@ -26,6 +28,7 @@ import com.manishpateluk.llmrouter.model.AttemptRecord;
 import com.manishpateluk.llmrouter.model.Message;
 import com.manishpateluk.llmrouter.model.Request;
 import com.manishpateluk.llmrouter.model.Response;
+import com.manishpateluk.llmrouter.model.ToolDefinitionValidator;
 import com.manishpateluk.llmrouter.model.Usage;
 import com.manishpateluk.llmrouter.negotiation.CapabilityNegotiator;
 import com.manishpateluk.llmrouter.negotiation.NegotiationResult;
@@ -153,12 +156,13 @@ public final class LlmRouter {
         List<AttemptRecord> attempts = new ArrayList<>();
         for (RouteEntry candidate : candidates) {
             ProviderAdapter adapter = adapters.get(candidate.getProvider());
-            if (adapter == null || !adapter.isAvailable()) {
-                attempts.add(recordSkip(candidate));
+            ModelEntry modelEntry = findModel(candidate);
+            String skipReason = skipReason(adapter, candidate, modelEntry, request, config);
+            if (skipReason != null) {
+                attempts.add(recordSkip(candidate, skipReason));
                 continue;
             }
 
-            ModelEntry modelEntry = ModelCapabilityTable.findModel(candidate.getProvider(), candidate.getModel()).orElse(null);
             NegotiationResult negotiation = negotiate(modelEntry, request, config);
 
             try {
@@ -234,13 +238,14 @@ public final class LlmRouter {
 
         RouteEntry candidate = candidates.get(index);
         ProviderAdapter adapter = adapters.get(candidate.getProvider());
-        if (adapter == null || !adapter.isAvailable()) {
-            attempts.add(recordSkip(candidate));
+        ModelEntry modelEntry = findModel(candidate);
+        RouterConfig config = resolveConfig(request);
+        String skipReason = skipReason(adapter, candidate, modelEntry, request, config);
+        if (skipReason != null) {
+            attempts.add(recordSkip(candidate, skipReason));
             return attemptAsync(request, candidates, index + 1, attempts);
         }
 
-        ModelEntry modelEntry = ModelCapabilityTable.findModel(candidate.getProvider(), candidate.getModel()).orElse(null);
-        RouterConfig config = resolveConfig(request);
         NegotiationResult negotiation = negotiate(modelEntry, request, config);
 
         Request toSend;
@@ -266,7 +271,8 @@ public final class LlmRouter {
 
     private List<RouteEntry> resolveCandidates(Request request, RouterConfig config) {
         int promptTokens = TokenEstimator.estimateTokens(request.getPrompt());
-        List<RouteEntry> candidates = RouteResolver.resolve(config, promptTokens, availableProviders());
+        List<RouteEntry> candidates = RouteResolver.resolve(config, promptTokens, availableProviders(),
+                model -> unmetRequiredFeatures(model, request, config).isEmpty());
         if (candidates.isEmpty() && config.getRoute() == null) {
             throw new NoProvidersConfiguredException(
                     "No provider credentials were detected. Set at least one provider's API key "
@@ -280,6 +286,54 @@ public final class LlmRouter {
         return Arrays.stream(Provider.values())
                 .filter(provider -> adapters.containsKey(provider) && adapters.get(provider).isAvailable())
                 .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private static ModelEntry findModel(RouteEntry candidate) {
+        return candidate.isProviderOnly()
+                ? null
+                : ModelCapabilityTable.findModel(candidate.getProvider(), candidate.getModel()).orElse(null);
+    }
+
+    /**
+     * Why {@code candidate} must be skipped without being attempted, or {@code null} if it should
+     * be tried: no credentials (§5.1), or it can't honor one of {@code requiredFeatures} (§5.4).
+     * A model missing from the capability table has no data to check against, so — consistent
+     * with how negotiation treats it — it's tried optimistically rather than skipped.
+     */
+    private static String skipReason(
+            ProviderAdapter adapter, RouteEntry candidate, ModelEntry modelEntry, Request request, RouterConfig config) {
+        if (adapter == null || !adapter.isAvailable()) {
+            return "no API key detected";
+        }
+        if (candidate.isProviderOnly()) {
+            // RouteResolver leaves a provider-only entry unexpanded only when none of its models qualified.
+            return "no " + candidate.getProvider() + " model supports required feature(s) "
+                    + requiredFeaturesInUse(request, config);
+        }
+        if (modelEntry != null) {
+            List<Feature> unmet = unmetRequiredFeatures(modelEntry, request, config);
+            if (!unmet.isEmpty()) {
+                return "model does not support required feature(s) " + unmet;
+            }
+        }
+        return null;
+    }
+
+    private static List<Feature> unmetRequiredFeatures(ModelEntry modelEntry, Request request, RouterConfig config) {
+        return CapabilityNegotiator.unmetRequiredFeatures(
+                modelEntry, request, config.getStructuredOutputStrategy(), config.getRequiredFeatures());
+    }
+
+    /** The required features this particular request actually uses, for skip messages. */
+    private static List<Feature> requiredFeaturesInUse(Request request, RouterConfig config) {
+        return Arrays.stream(Feature.values())
+                .filter(config.getRequiredFeatures()::contains)
+                .filter(feature -> switch (feature) {
+                    case TOOLS -> !request.getTools().isEmpty();
+                    case RESPONSE_SCHEMA -> request.getResponseSchema() != null;
+                    case ATTACHMENTS -> !request.getAttachments().isEmpty();
+                })
+                .toList();
     }
 
     private NegotiationResult negotiate(ModelEntry modelEntry, Request request, RouterConfig config) {
@@ -352,13 +406,13 @@ public final class LlmRouter {
         }
     }
 
-    private static AttemptRecord recordSkip(RouteEntry candidate) {
-        log.warn("Skipping {}/{}: no credentials available", candidate.getProvider(), candidate.getModel());
+    private static AttemptRecord recordSkip(RouteEntry candidate, String reason) {
+        log.warn("Skipping {}/{}: {}", candidate.getProvider(), candidate.getModel(), reason);
         return AttemptRecord.builder()
                 .provider(candidate.getProvider())
                 .model(candidate.getModel())
                 .outcome(AttemptOutcome.SKIPPED)
-                .reason("no API key detected")
+                .reason(reason)
                 .build();
     }
 
@@ -392,6 +446,13 @@ public final class LlmRouter {
         }
         if (config.getStructuredOutputStrategy() == null) {
             throw new InvalidConfigException("RouterConfig.structuredOutputStrategy must not be null");
+        }
+        if (config.getRequiredFeatures() == null) {
+            throw new InvalidConfigException("RouterConfig.requiredFeatures must not be null");
+        }
+        List<String> toolProblems = ToolDefinitionValidator.validate(request.getTools());
+        if (!toolProblems.isEmpty()) {
+            throw new InvalidRequestException("Invalid tool definitions:\n  - " + String.join("\n  - ", toolProblems));
         }
     }
 }

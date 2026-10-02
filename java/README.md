@@ -112,7 +112,30 @@ response.getToolCalls().forEach(call ->
     System.out.println(call.getName() + " " + call.getArguments()));
 ```
 
-The router never executes tool calls itself — it only returns what the model requested; running them is your application's job. Attachments (`Request.builder().attachments(...)`) and a `responseSchema` for structured output work the same way — see [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) §3 and §4 for the full shape and how unsupported features get dropped and reported back to you.
+The router never executes tool calls itself — it only returns what the model requested; running them is your application's job.
+
+Tool definitions are validated before any provider is called. Each `name` must match `^[a-zA-Z0-9_-]{1,64}$` and be unique within the request, and `parameters` must be a JSON Schema object with `"type": "object"`. Use `Map.of("type", "object")` for a tool that takes no arguments. A violation throws `InvalidRequestException` (code `INVALID_REQUEST`) listing every problem at once. Attachments (`Request.builder().attachments(...)`) and a `responseSchema` for structured output work the same way — see [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) §3 and §4 for the full shape and how unsupported features get dropped and reported back to you.
+
+**Requiring features instead of letting them drop.** By default, if the model routed to can't support tools, a schema, or an attachment, the router drops that feature, records it in `getDroppedFeatures()`, and sends the call anyway. When your code depends on a feature — an agent loop whose control flow lives in its tools, say — mark it required so incapable candidates are skipped instead:
+
+```java
+import com.manishpateluk.llmrouter.config.Feature;
+import java.util.Set;
+
+RouterConfig agentConfig = RouterConfig.builder()
+    .route(List.of(RouteEntry.of(Provider.ANTHROPIC), RouteEntry.of(Provider.OPENAI)))
+    .requiredFeatures(Set.of(Feature.TOOLS)) // also RESPONSE_SCHEMA, ATTACHMENTS
+    .build();
+```
+
+- A skipped candidate shows up in `getAttempts()` as `SKIPPED`, with a reason such as `model does not support required feature(s) [tools]`.
+- For provider-only entries (and the default route), the router picks only among that provider's models that support the required features. This works with `costOptimized(true)` too.
+- If nothing qualifies, you get the usual `RouterExhaustedException`, and its `attempts()` list says why each candidate was skipped.
+- A required feature the request doesn't use is ignored, so one config can serve turns with and without tools.
+- `RESPONSE_SCHEMA` counts the prompt-fallback strategy as honoring the schema. Add `.structuredOutputStrategy(StructuredOutputStrategy.NATIVE)` if you need native structured output.
+- Models that aren't in the capability table are still attempted, because there's no data to rule them out.
+
+See §5.4 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full rules.
 
 **Repeated attachments in a multi-turn conversation are deduplicated automatically.** If you pass the same attachment (byte-identical content) on `Request.attachments` across several calls — the common case for a tool-calling loop that keeps a file in context turn after turn — the Anthropic and OpenAI adapters upload it once via that provider's Files API and reference it by file id on every later call instead of re-encoding and re-sending the bytes. There's nothing to opt into: just keep passing the attachment as you already do, and reuse the same `LlmRouter` instance across the conversation (which you should be doing anyway). A few things worth knowing:
 

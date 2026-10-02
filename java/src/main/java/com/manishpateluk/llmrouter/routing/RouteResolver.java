@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
@@ -36,17 +37,31 @@ public final class RouteResolver {
      *                            {@code true}
      */
     public static List<RouteEntry> resolve(RouterConfig config, int promptTokens, Set<Provider> availableProviders) {
+        return resolve(config, promptTokens, availableProviders, model -> true);
+    }
+
+    /**
+     * As {@link #resolve(RouterConfig, int, Set)}, but provider-only entries (and the default
+     * route) expand only over models matching {@code eligible} — typically "can honor the
+     * request's {@code requiredFeatures}" (§5.4). The thinking-level heuristic and cost-optimized
+     * qualifying set are both computed over the eligible models alone. Fully-specified entries
+     * are never filtered here; the router checks those per attempt.
+     */
+    public static List<RouteEntry> resolve(
+            RouterConfig config, int promptTokens, Set<Provider> availableProviders, Predicate<ModelEntry> eligible) {
         Objects.requireNonNull(config, "config must not be null");
         Objects.requireNonNull(availableProviders, "availableProviders must not be null");
+        Objects.requireNonNull(eligible, "eligible must not be null");
 
         List<RouteEntry> route = config.getRoute();
         if (route == null) {
             route = availableProviders.stream().map(RouteEntry::of).collect(Collectors.toList());
         }
-        return expand(route, config, promptTokens);
+        return expand(route, config, promptTokens, eligible);
     }
 
-    private static List<RouteEntry> expand(List<RouteEntry> route, RouterConfig config, int promptTokens) {
+    private static List<RouteEntry> expand(
+            List<RouteEntry> route, RouterConfig config, int promptTokens, Predicate<ModelEntry> eligible) {
         List<RouteEntry> resolved = new ArrayList<>();
         for (RouteEntry entry : route) {
             if (!entry.isProviderOnly()) {
@@ -56,6 +71,11 @@ public final class RouteResolver {
             }
             List<ModelEntry> providerModels = ModelCapabilityTable.listModels(entry.getProvider());
             if (providerModels.isEmpty()) {
+                continue;
+            }
+            providerModels = providerModels.stream().filter(eligible).toList();
+            if (providerModels.isEmpty()) {
+                resolved.add(entry); // nothing eligible — left unexpanded for the router to record as skipped
                 continue;
             }
             if (config.isCostOptimized()) {

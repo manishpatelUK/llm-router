@@ -5,11 +5,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import com.manishpateluk.llmrouter.capability.ModelEntry;
+import com.manishpateluk.llmrouter.config.Feature;
 import com.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import com.manishpateluk.llmrouter.model.Attachment;
 import com.manishpateluk.llmrouter.model.Request;
+import com.manishpateluk.llmrouter.model.ToolDefinition;
 import com.manishpateluk.llmrouter.provider.Provider;
 
 import org.junit.jupiter.api.Test;
@@ -86,7 +89,7 @@ class CapabilityNegotiatorTest {
     @Test
     void toolsKeptWhenSupportedDroppedWhenNot() {
         Request request = Request.builder().prompt("p")
-                .tools(List.of(com.manishpateluk.llmrouter.model.ToolDefinition.builder()
+                .tools(List.of(ToolDefinition.builder()
                         .name("lookup").description("d").parameters(Map.of()).build()))
                 .build();
 
@@ -220,7 +223,7 @@ class CapabilityNegotiatorTest {
     @Test
     void negotiationIsIndependentPerAttemptAndDoesNotMutateOriginalRequest() {
         Request original = Request.builder().prompt("p")
-                .tools(List.of(com.manishpateluk.llmrouter.model.ToolDefinition.builder()
+                .tools(List.of(ToolDefinition.builder()
                         .name("t").description("d").parameters(Map.of()).build()))
                 .build();
 
@@ -230,6 +233,39 @@ class CapabilityNegotiatorTest {
         assertThat(first.getDroppedFeatures()).containsExactly("tools");
         assertThat(second.getDroppedFeatures()).isEmpty();
         assertThat(original.getTools()).hasSize(1); // original untouched
+    }
+
+    @Test
+    void unmetRequiredFeaturesListsOnlyRequiredFeaturesTheModelWouldDrop() {
+        Request request = Request.builder()
+                .prompt("p")
+                .responseSchema(SCHEMA)
+                .tools(List.of(ToolDefinition.builder().name("t").parameters(Map.of("type", "object")).build()))
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[] {1}).build()))
+                .build();
+        ModelEntry model = fixture(false, false, false, false);
+        Set<Feature> all = Set.of(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS);
+
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.NATIVE, all))
+                .containsExactly(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS);
+        // prompt-fallback honors the schema, so it isn't unmet under AUTO
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.AUTO, all))
+                .containsExactly(Feature.TOOLS, Feature.ATTACHMENTS);
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.NATIVE, Set.of(Feature.TOOLS)))
+                .containsExactly(Feature.TOOLS);
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.NATIVE, Set.of()))
+                .isEmpty();
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(fixture(true, true, true, true), request, StructuredOutputStrategy.NATIVE, all))
+                .isEmpty();
+    }
+
+    @Test
+    void requiredFeatureUnusedByRequestIsNeverUnmet() {
+        Request request = Request.builder().prompt("p").build();
+
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(fixture(false, false, false, false), request,
+                StructuredOutputStrategy.NATIVE, Set.of(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS)))
+                .isEmpty();
     }
 
     private static ModelEntry fixture(boolean structuredOutput, boolean tools, boolean vision, boolean fileInput) {

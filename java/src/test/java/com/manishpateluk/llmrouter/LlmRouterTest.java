@@ -13,16 +13,20 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
+import com.manishpateluk.llmrouter.config.Feature;
 import com.manishpateluk.llmrouter.config.RouteEntry;
 import com.manishpateluk.llmrouter.config.RouterConfig;
 import com.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import com.manishpateluk.llmrouter.config.ThinkingLevel;
+import com.manishpateluk.llmrouter.error.ErrorCode;
 import com.manishpateluk.llmrouter.error.InvalidConfigException;
+import com.manishpateluk.llmrouter.error.InvalidRequestException;
 import com.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
 import com.manishpateluk.llmrouter.error.RouterExhaustedException;
 import com.manishpateluk.llmrouter.model.AttemptOutcome;
@@ -47,6 +51,10 @@ class LlmRouterTest {
     private ProviderAdapter anthropic;
     @Mock
     private ProviderAdapter openai;
+    @Mock
+    private ProviderAdapter openrouter;
+    @Mock
+    private ProviderAdapter perplexity;
 
     @AfterEach
     void cleanUpRegisteredFixtures() {
@@ -294,7 +302,7 @@ class LlmRouterTest {
                 .build();
         Request request = Request.builder()
                 .prompt("hi")
-                .tools(List.of(ToolDefinition.builder().name("t").description("d").parameters(Map.of()).build()))
+                .tools(List.of(ToolDefinition.builder().name("t").description("d").parameters(Map.of("type", "object")).build()))
                 .config(config)
                 .build();
 
@@ -540,6 +548,230 @@ class LlmRouterTest {
         LlmRouter router = new LlmRouter(List.of());
 
         assertThatThrownBy(() -> router.complete("   ")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ---- requiredFeatures (§5.4) ----
+
+    private static final List<ToolDefinition> ONE_TOOL = List.of(ToolDefinition.builder()
+            .name("lookup").description("d").parameters(Map.of("type", "object")).build());
+
+    @Test
+    void requiredToolsSkipsIncapableExplicitCandidateAndFallsBackWithToolsIntact() {
+        registerFixtureModel(false, false, false); // openrouter/fixture-model: no tools
+        stubId(openrouter, Provider.OPENROUTER);
+        stubId(openai, Provider.OPENAI);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(openai.send(eq("gpt-6-astra"), captor.capture())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        verify(openrouter, never()).send(any(), any());
+        assertThat(captor.getValue().getTools()).isEqualTo(ONE_TOOL);
+        assertThat(response.getDroppedFeatures()).isEmpty();
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getModel()).isEqualTo("fixture-model");
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("model does not support required feature(s) [tools]");
+    }
+
+    @Test
+    void requiredToolsWithNoCapableCandidateExhaustsWithReasonInAttempts() {
+        registerFixtureModel(false, false, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        when(openrouter.isAvailable()).thenReturn(true);
+
+        LlmRouter router = new LlmRouter(List.of(openrouter));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+        Request request = Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build();
+
+        assertThatThrownBy(() -> router.complete(request))
+                .isInstanceOf(RouterExhaustedException.class)
+                .hasMessageContaining("model does not support required feature(s) [tools]")
+                .satisfies(e -> assertThat(((RouterExhaustedException) e).attempts())
+                        .singleElement()
+                        .satisfies(attempt -> assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED)));
+        verify(openrouter, never()).send(any(), any());
+    }
+
+    @Test
+    void requiredToolsSkipsProviderOnlyEntryWithNoCapableModelUnderCostOptimizedRouting() {
+        // No Perplexity model in the capability table supports tools.
+        stubId(perplexity, Provider.PERPLEXITY);
+        stubId(openai, Provider.OPENAI);
+        when(perplexity.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        ArgumentCaptor<String> model = ArgumentCaptor.forClass(String.class);
+        when(openai.send(model.capture(), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(perplexity, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.PERPLEXITY), RouteEntry.of(Provider.OPENAI)))
+                .costOptimized(true)
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        verify(perplexity, never()).send(any(), any());
+        assertThat(ModelCapabilityTable.findModel(Provider.OPENAI, model.getValue()).orElseThrow().isSupportsTools()).isTrue();
+        assertThat(response.getAttempts()).singleElement().satisfies(attempt -> {
+            assertThat(attempt.getProvider()).isEqualTo(Provider.PERPLEXITY);
+            assertThat(attempt.getModel()).isNull();
+            assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+            assertThat(attempt.getReason()).isEqualTo("no perplexity model supports required feature(s) [tools]");
+        });
+    }
+
+    @Test
+    void requiredToolsOnDefaultRouteWithOnlyIncapableProvidersExhaustsRatherThanNoProvidersConfigured() {
+        stubId(perplexity, Provider.PERPLEXITY);
+        when(perplexity.isAvailable()).thenReturn(true);
+
+        LlmRouter router = new LlmRouter(List.of(perplexity));
+        RouterConfig config = RouterConfig.builder().requiredFeatures(Set.of(Feature.TOOLS)).build();
+        Request request = Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build();
+
+        assertThatThrownBy(() -> router.complete(request))
+                .isInstanceOf(RouterExhaustedException.class)
+                .hasMessageContaining("no perplexity model supports required feature(s) [tools]");
+    }
+
+    @Test
+    void requiredFeatureTheRequestDoesNotUseIsTriviallySatisfied() {
+        registerFixtureModel(false, false, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openrouter.send(eq("fixture-model"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .requiredFeatures(Set.of(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("ok");
+        assertThat(response.getAttempts()).isEmpty();
+    }
+
+    @Test
+    void requiredResponseSchemaHonoredViaPromptFallbackIsNotSkippedButIsUnderNativeStrategy() {
+        registerFixtureModel(false, false, false); // no native structured output
+        stubId(openrouter, Provider.OPENROUTER);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openrouter.send(eq("fixture-model"), any())).thenReturn(fragment("{}"));
+        LlmRouter router = new LlmRouter(List.of(openrouter));
+        RouterConfig.RouterConfigBuilder config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .requiredFeatures(Set.of(Feature.RESPONSE_SCHEMA));
+        Map<String, Object> schema = Map.of("type", "object");
+
+        Response viaFallback = router.complete(Request.builder().prompt("hi").responseSchema(schema)
+                .config(config.structuredOutputStrategy(StructuredOutputStrategy.AUTO).build()).build());
+        assertThat(viaFallback.getAttempts()).isEmpty();
+
+        Request nativeOnly = Request.builder().prompt("hi").responseSchema(schema)
+                .config(config.structuredOutputStrategy(StructuredOutputStrategy.NATIVE).build()).build();
+        assertThatThrownBy(() -> router.complete(nativeOnly))
+                .isInstanceOf(RouterExhaustedException.class)
+                .hasMessageContaining("[responseSchema]");
+    }
+
+    @Test
+    void requiredToolsStillAttemptsModelMissingFromCapabilityTable() {
+        stubId(openai, Provider.OPENAI);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("not-in-table"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENAI, "not-in-table")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        assertThat(response.getContent()).isEqualTo("ok");
+    }
+
+    @Test
+    void requiredToolsSkipAlsoAppliesOnTheAsyncPath() {
+        registerFixtureModel(false, false, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        stubId(openai, Provider.OPENAI);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.sendAsync(eq("gpt-6-astra"), any())).thenReturn(CompletableFuture.completedFuture(fragment("async ok")));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.completeAsync(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build()).join();
+
+        verify(openrouter, never()).sendAsync(any(), any());
+        assertThat(response.getContent()).isEqualTo("async ok");
+        assertThat(response.getAttempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED));
+    }
+
+    @Test
+    void invalidConfigWhenRequiredFeaturesExplicitlyNulled() {
+        LlmRouter router = new LlmRouter(List.of());
+        RouterConfig config = RouterConfig.builder().requiredFeatures(null).build();
+
+        assertThatThrownBy(() -> router.complete("hi", config)).isInstanceOf(InvalidConfigException.class);
+    }
+
+    // ---- tool definition validation (§3.1) ----
+
+    @Test
+    void invalidToolDefinitionsAreRejectedBeforeAnyProviderIsCalled() {
+        stubId(openai, Provider.OPENAI);
+        lenient().when(openai.isAvailable()).thenReturn(true);
+        LlmRouter router = new LlmRouter(List.of(openai));
+        Request request = Request.builder()
+                .prompt("hi")
+                .tools(List.of(
+                        ToolDefinition.builder().name("bad name").parameters(Map.of("type", "object")).build(),
+                        ToolDefinition.builder().name("dup").parameters(Map.of("type", "object")).build(),
+                        ToolDefinition.builder().name("dup").parameters(Map.of("type", "object")).build()))
+                .build();
+
+        assertThatThrownBy(() -> router.complete(request))
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessageContaining("tools[0] 'bad name': name must match")
+                .hasMessageContaining("tools[2] 'dup': duplicate tool name")
+                .satisfies(e -> assertThat(((InvalidRequestException) e).code()).isEqualTo(ErrorCode.INVALID_REQUEST));
+        verify(openai, never()).send(any(), any());
+    }
+
+    @Test
+    void invalidToolDefinitionsFailTheAsyncFutureRatherThanThrowing() {
+        LlmRouter router = new LlmRouter(List.of());
+        Request request = Request.builder()
+                .prompt("hi")
+                .tools(List.of(ToolDefinition.builder().name("t").parameters(Map.of()).build()))
+                .build();
+
+        CompletableFuture<Response> future = router.completeAsync(request);
+
+        assertThat(future).isCompletedExceptionally();
+        assertThatThrownBy(future::join).hasCauseInstanceOf(InvalidRequestException.class);
     }
 
     private static void registerFixtureModel(boolean structuredOutput, boolean tools, boolean vision) {

@@ -2,6 +2,8 @@ package com.manishpateluk.llmrouter.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Set;
+
 import tools.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,18 @@ class RouterConfigTest {
         assertThat(config.getStructuredOutputStrategy()).isEqualTo(StructuredOutputStrategy.AUTO);
         assertThat(config.getTemperature()).isNull();
         assertThat(config.getTopP()).isNull();
+        assertThat(config.getRequiredFeatures()).isEmpty();
+    }
+
+    @Test
+    void requiredFeaturesRoundTripThroughJsonUsingCanonicalWireValues() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+
+        RouterConfig config = mapper.readValue("{\"requiredFeatures\": [\"tools\", \"responseSchema\"]}", RouterConfig.class);
+
+        assertThat(config.getRequiredFeatures()).containsExactlyInAnyOrder(Feature.TOOLS, Feature.RESPONSE_SCHEMA);
+        assertThat(mapper.writeValueAsString(Feature.ATTACHMENTS)).isEqualTo("\"attachments\"");
+        assertThat(mapper.readValue("{}", RouterConfig.class).getRequiredFeatures()).isEqualTo(Set.of());
     }
 
     @Test

@@ -1,12 +1,15 @@
 package com.manishpateluk.llmrouter.negotiation;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
+import com.manishpateluk.llmrouter.config.Feature;
 import com.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import com.manishpateluk.llmrouter.model.Attachment;
 import com.manishpateluk.llmrouter.model.Request;
@@ -99,6 +102,27 @@ public final class CapabilityNegotiator {
                 .droppedFeatures(List.copyOf(droppedFeatures))
                 .structuredOutputViaPromptFallback(structuredOutputViaPromptFallback)
                 .build();
+    }
+
+    /**
+     * The members of {@code required} that negotiating {@code request} against {@code model}
+     * would drop (§5.4), in {@link Feature} declaration order — empty if the model can honor
+     * every required feature the request actually uses. Defined in terms of {@link #negotiate}
+     * itself, so "required" always means exactly "would otherwise appear in
+     * {@code droppedFeatures}": a {@code responseSchema} honored via prompt-fallback counts as
+     * honored, and a required feature the request doesn't use is never unmet.
+     */
+    public static List<Feature> unmetRequiredFeatures(
+            ModelEntry model, Request request, StructuredOutputStrategy strategy, Set<Feature> required) {
+        Objects.requireNonNull(required, "required must not be null");
+        if (required.isEmpty()) {
+            return List.of();
+        }
+        List<String> dropped = negotiate(model, request, strategy).getDroppedFeatures();
+        return Arrays.stream(Feature.values())
+                .filter(required::contains)
+                .filter(feature -> dropped.contains(feature.wireValue()))
+                .toList();
     }
 
     private static boolean allAttachmentsSupported(List<Attachment> attachments, ModelEntry model) {

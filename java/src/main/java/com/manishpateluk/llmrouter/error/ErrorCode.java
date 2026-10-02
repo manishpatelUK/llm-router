@@ -5,4 +5,5 @@ public enum ErrorCode {
     ROUTER_EXHAUSTED,
     NO_PROVIDERS_CONFIGURED,
     INVALID_CONFIG,
+    INVALID_REQUEST,
 }
