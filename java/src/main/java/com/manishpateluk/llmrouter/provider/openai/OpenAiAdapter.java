@@ -11,7 +11,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import com.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
 import com.manishpateluk.llmrouter.model.Attachment;
@@ -219,7 +219,7 @@ public final class OpenAiAdapter implements ProviderAdapter {
     private static String toArgumentsJson(Map<String, Object> arguments) {
         try {
             return JSON.writeValueAsString(arguments == null ? Map.of() : arguments);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (tools.jackson.core.JacksonException e) {
             throw new IllegalStateException("Failed to serialize tool call arguments", e);
         }
     }

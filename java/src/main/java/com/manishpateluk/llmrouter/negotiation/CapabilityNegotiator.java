@@ -4,8 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import com.manishpateluk.llmrouter.capability.ModelEntry;
 import com.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import com.manishpateluk.llmrouter.model.Attachment;
@@ -126,7 +126,7 @@ public final class CapabilityNegotiator {
     private static String writeSchemaAsJson(java.util.Map<String, Object> schema) {
         try {
             return SCHEMA_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(schema);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalArgumentException("responseSchema could not be serialized to JSON", e);
         }
     }

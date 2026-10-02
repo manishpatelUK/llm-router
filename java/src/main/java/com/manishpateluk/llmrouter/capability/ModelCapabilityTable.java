@@ -10,8 +10,7 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import tools.jackson.databind.ObjectMapper;
 import com.manishpateluk.llmrouter.provider.Provider;
 
 import lombok.Builder;
@@ -138,7 +137,7 @@ public final class ModelCapabilityTable {
     }
 
     private static List<ModelEntry> loadSeedModels() {
-        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        ObjectMapper mapper = new ObjectMapper();
         try (InputStream in = ModelCapabilityTable.class.getResourceAsStream(RESOURCE_PATH)) {
             if (in == null) {
                 throw new IllegalStateException(

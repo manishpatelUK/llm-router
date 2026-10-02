@@ -41,8 +41,8 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.source>25</maven.compiler.source>
     <maven.compiler.target>25</maven.compiler.target>
-    <lombok.version>1.18.38</lombok.version>
-    <jackson.version>2.18.2</jackson.version>
+    <lombok.version>1.18.48</lombok.version>
+    <jackson.version>3.2.3</jackson.version>
     <junit.version>5.11.4</junit.version>
     <assertj.version>3.26.3</assertj.version>
     <anthropic.version>2.62.0</anthropic.version>
@@ -63,13 +63,10 @@
     </dependency>
 
     <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
+      <!-- Jackson 3: java.time support is built into databind, so no separate jsr310 module.
+           Annotations stay on com.fasterxml.jackson.annotation (pulled in transitively). -->
+      <groupId>tools.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <version>${jackson.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>com.fasterxml.jackson.datatype</groupId>
-      <artifactId>jackson-datatype-jsr310</artifactId>
       <version>${jackson.version}</version>
     </dependency>
 
