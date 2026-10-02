@@ -306,7 +306,7 @@ Algorithm:
 4. Select the model(s) whose `thinkingScore` is closest to the target score.
 5. Break ties, in order: (a) higher `speedScore`, (b) lower combined input+output cost, (c) alphabetical `model` id — so selection is deterministic.
 
-For cost-optimized expansion (§5.3), instead of collapsing to a single closest match in step 4, take **all models within a 1 point thinkingScore tolerance band** of the target score as the "qualifying set", then sort that set ascending by estimated cost for the actual prompt.
+For cost-optimized expansion (§5.3), instead of collapsing to a single closest match in step 4, take **all models within a 1 point thinkingScore tolerance band** of the target score as the "qualifying set", then sort that set ascending by estimated cost for the actual prompt. If no model falls inside the band (a lineup with a gap around the target), widen it just enough to include the closest model(s) to the target, so the qualifying set is never empty: turning on `costOptimized` must never remove a provider from the route that would have served it without it.
 
 ---
 

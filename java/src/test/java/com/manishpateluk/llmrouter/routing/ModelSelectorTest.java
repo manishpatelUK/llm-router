@@ -64,6 +64,19 @@ class ModelSelectorTest {
     }
 
     @Test
+    void qualifyingSetFallsBackToClosestModelWhenNoneIsWithinTolerance() {
+        // scores 9.5 / 7.5 / 4 at LOW: target = 4 + 0.25 * 5.5 = 5.375. Nothing is within 1.0
+        // (4 is 1.375 away, 7.5 is 2.125), so the set is the closest model alone.
+        List<ModelEntry> lineup = List.of(
+                fixture("top", 9.5, 5, 10.0), fixture("mid", 7.5, 5, 4.0), fixture("small", 4, 5, 0.2));
+
+        List<ModelEntry> qualifying = ModelSelector.selectQualifyingSet(lineup, ThinkingLevel.LOW);
+
+        assertThat(qualifying).extracting(ModelEntry::getModel).containsExactly("small");
+        assertThat(qualifying).containsExactly(ModelSelector.selectModel(lineup, ThinkingLevel.LOW));
+    }
+
+    @Test
     void rankByEstimatedCostOrdersAscendingByInputCost() {
         List<ModelEntry> qualifying = ModelSelector.selectQualifyingSet(ANTHROPIC_MODELS, ThinkingLevel.MAX);
 

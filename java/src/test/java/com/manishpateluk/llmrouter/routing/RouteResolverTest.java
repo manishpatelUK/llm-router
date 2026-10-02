@@ -80,6 +80,24 @@ class RouteResolverTest {
     }
 
     @Test
+    void costOptimizedProviderOnlyEntryNeverDisappearsWhenNoModelIsWithinTolerance() {
+        // OpenAI's lineup has no model within 1 point of the LOW target; the entry must still expand.
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENAI)))
+                .thinkingLevel(ThinkingLevel.LOW)
+                .costOptimized(true)
+                .build();
+        RouterConfig notCostOptimized = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENAI)))
+                .thinkingLevel(ThinkingLevel.LOW)
+                .build();
+
+        List<RouteEntry> resolved = RouteResolver.resolve(config, 1_000, NO_PROVIDERS);
+
+        assertThat(resolved).isNotEmpty().contains(RouteResolver.resolve(notCostOptimized, 1_000, NO_PROVIDERS).get(0));
+    }
+
+    @Test
     void eligibleFilterNarrowsProviderOnlyExpansionBeforeTheHeuristicRuns() {
         RouterConfig config = RouterConfig.builder()
                 .route(List.of(RouteEntry.of(Provider.ANTHROPIC)))

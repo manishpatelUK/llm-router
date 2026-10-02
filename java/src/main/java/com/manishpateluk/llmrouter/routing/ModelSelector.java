@@ -54,6 +54,9 @@ public final class ModelSelector {
     /**
      * All of a provider's models within a 1-point {@code thinkingScore} tolerance band of the
      * §7.2 target score for {@code level} — the cost-optimized "qualifying set" (§5.3), unsorted.
+     * If no model falls inside the band (a lineup with a gap around the target), the set is the
+     * model(s) closest to the target instead, so it is never empty and a provider never drops out
+     * of a cost-optimized route that it would have served without {@code costOptimized}.
      * Rank it with {@link #rankByEstimatedCost} once the prompt's token count is known.
      *
      * @throws IllegalArgumentException if {@code providerModels} is empty
@@ -61,9 +64,14 @@ public final class ModelSelector {
     public static List<ModelEntry> selectQualifyingSet(List<ModelEntry> providerModels, ThinkingLevel level) {
         List<ModelEntry> models = requireNonEmpty(providerModels);
         double targetScore = targetScore(models, level);
+        double minDistance = models.stream()
+                .mapToDouble(m -> distance(m, targetScore))
+                .min()
+                .orElseThrow();
+        double tolerance = Math.max(QUALIFYING_SET_TOLERANCE, minDistance);
 
         return models.stream()
-                .filter(m -> distance(m, targetScore) <= QUALIFYING_SET_TOLERANCE)
+                .filter(m -> distance(m, targetScore) <= tolerance)
                 .collect(Collectors.toList());
     }
 
