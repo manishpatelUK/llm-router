@@ -15,6 +15,23 @@ Design priorities, in order:
 
 Anthropic (Claude), OpenAI, Perplexity, NVIDIA (NIM), Hugging Face, and OpenRouter — each behind a common adapter, so calling code never needs to know which one actually served a request.
 
+## Configuring credentials
+
+Every language implementation detects provider credentials from environment variables on first use — no explicit configuration required. For each provider, it checks a library-specific variable first, then falls back to that provider's common one:
+
+| Provider | Env var (checked first) | Falls back to |
+|---|---|---|
+| Anthropic | `LLM_ROUTER_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
+| OpenAI | `LLM_ROUTER_OPENAI_API_KEY` | `OPENAI_API_KEY` |
+| Perplexity | `LLM_ROUTER_PERPLEXITY_API_KEY` | `PERPLEXITY_API_KEY` |
+| NVIDIA | `LLM_ROUTER_NVIDIA_API_KEY` | `NVIDIA_API_KEY` |
+| Hugging Face | `LLM_ROUTER_HUGGINGFACE_API_KEY` | `HF_TOKEN`, then `HUGGINGFACE_API_KEY` |
+| OpenRouter | `LLM_ROUTER_OPENROUTER_API_KEY` | `OPENROUTER_API_KEY` |
+
+You only need to set the key(s) for whichever provider(s) you actually want to use — the router routes only among providers it finds credentials for. See [`LIBRARY_SPEC.md`](LIBRARY_SPEC.md) §6 for the full detection rules.
+
+**Hugging Face:** Hugging Face has no separate "API key". Its credential is a User Access Token (starts with `hf_`, created at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)), and all three variables above are just alternative names for that one token. Set **one** of them. If you already use the Hugging Face CLI or libraries, `HF_TOKEN` is probably set already and the router will pick it up. If more than one is set, the first non-empty one in the order shown wins. The router calls Hugging Face Inference Providers, so a fine-grained token needs permission to make calls to Inference Providers.
+
 ## Language implementations
 
 - **[Java](java/README.md)** — install/usage instructions in its own README.
@@ -30,7 +47,7 @@ Anthropic (Claude), OpenAI, Perplexity, NVIDIA (NIM), Hugging Face, and OpenRout
 
 ## How it works
 
-1. Bring the library into your project and instantiate the router client — zero required arguments. It lazily detects available provider credentials from environment variables on first use.
+1. Bring the library into your project and instantiate the router client — zero required arguments. It lazily detects available provider credentials from environment variables on first use (see [Configuring credentials](#configuring-credentials)).
 2. Call it with a prompt (plus, optionally, history, system instructions, tools, a structured-output schema, file attachments, and/or a `RouterConfig`).
 3. The router resolves an ordered list of `(provider, model)` candidates — from your config, or a computed default of whichever providers it found credentials for — and tries them in order. Before each attempt it checks that model's entry in the Model Capability Table and adapts the request to what it actually supports (dropping or falling back on anything it can't send, and reporting that back to you). If a candidate fails, it moves to the next one automatically.
 4. You get back a unified response — the text, structured output, any tool calls, which provider/model actually served it, token usage and estimated cost, what (if anything) got dropped, and the full list of attempts if it didn't succeed on the first try.

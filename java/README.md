@@ -16,22 +16,9 @@ Include this in your `pom.xml`:
 
 Requires **Java 25+**.
 
-## Configuring credentials
-
-The router detects provider credentials from environment variables on first use — no explicit configuration required. For each provider, it checks a library-specific variable first, then falls back to that provider's common one:
-
-| Provider | Env var (checked first) | Falls back to |
-|---|---|---|
-| Anthropic | `LLM_ROUTER_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
-| OpenAI | `LLM_ROUTER_OPENAI_API_KEY` | `OPENAI_API_KEY` |
-| Perplexity | `LLM_ROUTER_PERPLEXITY_API_KEY` | `PERPLEXITY_API_KEY` |
-| NVIDIA | `LLM_ROUTER_NVIDIA_API_KEY` | `NVIDIA_API_KEY` |
-| Hugging Face | `LLM_ROUTER_HUGGINGFACE_API_KEY` | `HF_TOKEN`, then `HUGGINGFACE_API_KEY` |
-| OpenRouter | `LLM_ROUTER_OPENROUTER_API_KEY` | `OPENROUTER_API_KEY` |
-
-You only need to set the key(s) for whichever provider(s) you actually want to use — the router routes only among providers it finds credentials for.
-
 ## Quick start
+
+Set an API key for at least one provider first — see [Configuring credentials](../README.md#configuring-credentials) in the main README for the environment variables the router reads.
 
 ```java
 import com.manishpateluk.llmrouter.LlmRouter;
@@ -165,7 +152,7 @@ try {
 
 ## Learn more
 
-This README only covers installing and calling the library. For the full behavior spec — capability negotiation, the thinking-level model-selection heuristic, cost-optimized ordering, the Model Capability Table, error codes, and everything else — see [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) at the repo root.
+This README only covers installing and calling the library; credential setup lives in the [main README](../README.md#configuring-credentials). For the full behavior spec — capability negotiation, the thinking-level model-selection heuristic, cost-optimized ordering, the Model Capability Table, error codes, and everything else — see [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) at the repo root.
 
 ## Developer Notes on push (because I'm too stupid to remember these steps)
 
