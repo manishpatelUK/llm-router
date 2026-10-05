@@ -47,9 +47,9 @@ class ModelCapabilityTableTest {
     void seedModelsCarryTemperatureAndTopPCapabilityFlags() {
         ModelEntry alwaysOnReasoningModel = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-fable-5-1").orElseThrow();
         assertThat(alwaysOnReasoningModel.isSupportsTemperature()).isFalse();
-        assertThat(alwaysOnReasoningModel.isSupportsTopP()).isTrue();
+        assertThat(alwaysOnReasoningModel.isSupportsTopP()).isFalse();
 
-        ModelEntry ordinaryModel = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-sonnet-5").orElseThrow();
+        ModelEntry ordinaryModel = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-haiku-4-5-20251001").orElseThrow();
         assertThat(ordinaryModel.isSupportsTemperature()).isTrue();
         assertThat(ordinaryModel.isSupportsTopP()).isTrue();
     }

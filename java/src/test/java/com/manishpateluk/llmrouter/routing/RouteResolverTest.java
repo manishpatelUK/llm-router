@@ -48,11 +48,11 @@ class RouteResolverTest {
                 .costOptimized(true)
                 .build();
 
-        // qualifying set for MAX is {opus-5, fable-5-1}; opus-5 ($5/1M) is cheaper than fable-5-1 ($10/1M)
+        // qualifying set for MAX is {opus-5-5, fable-5-1}; opus-5-5 ($4/1M) is cheaper than fable-5-1 ($10/1M)
         List<RouteEntry> resolved = RouteResolver.resolve(config, 1_000_000, NO_PROVIDERS);
 
         assertThat(resolved).containsExactly(
-                RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"),
+                RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"),
                 RouteEntry.of(Provider.ANTHROPIC, "claude-fable-5-1"));
     }
 
@@ -65,7 +65,7 @@ class RouteResolverTest {
 
         assertThat(resolved).hasSize(2);
         assertThat(resolved.get(0).getProvider()).isEqualTo(Provider.ANTHROPIC);
-        assertThat(resolved.get(0).getModel()).isEqualTo("claude-sonnet-5"); // medium tier, established in ModelSelectorTest
+        assertThat(resolved.get(0).getModel()).isEqualTo("claude-sonnet-5-5"); // medium tier, established in ModelSelectorTest
         assertThat(resolved.get(1).getProvider()).isEqualTo(Provider.NVIDIA);
         assertThat(resolved.get(1).getModel()).isNotNull();
     }
@@ -107,7 +107,7 @@ class RouteResolverTest {
         List<RouteEntry> resolved = RouteResolver.resolve(config, 0, NO_PROVIDERS,
                 model -> !model.getModel().equals("claude-fable-5-1"));
 
-        assertThat(resolved).containsExactly(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"));
+        assertThat(resolved).containsExactly(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"));
     }
 
     @Test

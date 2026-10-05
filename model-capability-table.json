@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-14T14:17:23Z",
+  "lastUpdated": "2026-10-05T19:22:14Z",
   "notes": "Seed data. Pricing and lineups change frequently — treat as best-effort and refresh periodically. See MODEL_CAPABILITY_HEURISTICS.md for the scoring methodology and the update-model-capability-table skill for the refresh procedure. Hugging Face is intentionally excluded (too many models to seed meaningfully) — add entries there yourself via registerModel(). OpenRouter entries are limited to models not already covered by the anthropic/openai/perplexity entries below (per project decision), to avoid redundant duplicate listings of the same underlying models.",
   "models": [
     {
@@ -18,16 +18,16 @@
       "supportsFileInput": true,
       "supportsFileOutput": true,
       "supportsTemperature": false,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "supportsTopP": false,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "anthropic",
-      "model": "claude-opus-5",
-      "inputCostPerMillionTokens": 5,
-      "outputCostPerMillionTokens": 25,
-      "thinkingScore": 9,
-      "speedScore": 4,
+      "model": "claude-opus-5-5",
+      "inputCostPerMillionTokens": 4,
+      "outputCostPerMillionTokens": 20,
+      "thinkingScore": 9.5,
+      "speedScore": 3,
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
@@ -35,13 +35,13 @@
       "supportsVision": true,
       "supportsFileInput": true,
       "supportsFileOutput": true,
-      "supportsTemperature": true,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "supportsTemperature": false,
+      "supportsTopP": false,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "anthropic",
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "inputCostPerMillionTokens": 2,
       "outputCostPerMillionTokens": 10,
       "thinkingScore": 7.5,
@@ -53,9 +53,9 @@
       "supportsVision": true,
       "supportsFileInput": true,
       "supportsFileOutput": true,
-      "supportsTemperature": true,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "supportsTemperature": false,
+      "supportsTopP": false,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "anthropic",
@@ -73,7 +73,7 @@
       "supportsFileOutput": true,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openai",
@@ -83,51 +83,51 @@
       "thinkingScore": 9.5,
       "speedScore": 3,
       "contextWindowTokens": 1050000,
-      "maxOutputTokens": 32768,
+      "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
       "supportsVision": true,
       "supportsFileInput": true,
       "supportsFileOutput": true,
-      "supportsTemperature": true,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "supportsTemperature": false,
+      "supportsTopP": false,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openai",
-      "model": "gpt-5.6-sol",
-      "inputCostPerMillionTokens": 4,
-      "outputCostPerMillionTokens": 20,
-      "thinkingScore": 7.5,
+      "model": "gpt-6.1-sol",
+      "inputCostPerMillionTokens": 2,
+      "outputCostPerMillionTokens": 10,
+      "thinkingScore": 8,
       "speedScore": 6,
       "contextWindowTokens": 1050000,
-      "maxOutputTokens": 32768,
+      "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
       "supportsVision": true,
       "supportsFileInput": true,
       "supportsFileOutput": true,
-      "supportsTemperature": true,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "supportsTemperature": false,
+      "supportsTopP": false,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openai",
-      "model": "gpt-5.4-nano",
-      "inputCostPerMillionTokens": 0.2,
-      "outputCostPerMillionTokens": 1.25,
-      "thinkingScore": 4,
-      "speedScore": 8.5,
-      "contextWindowTokens": 400000,
-      "maxOutputTokens": 16384,
+      "model": "gpt-6-luna",
+      "inputCostPerMillionTokens": 0.1,
+      "outputCostPerMillionTokens": 0.5,
+      "thinkingScore": 5,
+      "speedScore": 9,
+      "contextWindowTokens": 1050000,
+      "maxOutputTokens": 128000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
       "supportsVision": true,
       "supportsFileInput": true,
       "supportsFileOutput": true,
-      "supportsTemperature": true,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "supportsTemperature": false,
+      "supportsTopP": false,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "perplexity",
@@ -140,12 +140,12 @@
       "maxOutputTokens": 8000,
       "supportsStructuredOutput": true,
       "supportsTools": false,
-      "supportsVision": false,
+      "supportsVision": true,
       "supportsFileInput": false,
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "perplexity",
@@ -154,7 +154,7 @@
       "outputCostPerMillionTokens": 15,
       "thinkingScore": 7,
       "speedScore": 5,
-      "contextWindowTokens": 127072,
+      "contextWindowTokens": 200000,
       "maxOutputTokens": 8000,
       "supportsStructuredOutput": true,
       "supportsTools": false,
@@ -163,7 +163,7 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "perplexity",
@@ -176,30 +176,30 @@
       "maxOutputTokens": 8000,
       "supportsStructuredOutput": true,
       "supportsTools": false,
-      "supportsVision": false,
+      "supportsVision": true,
       "supportsFileInput": false,
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "nvidia",
-      "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-      "inputCostPerMillionTokens": 1.6,
-      "outputCostPerMillionTokens": 1.6,
-      "thinkingScore": 8,
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "inputCostPerMillionTokens": 0.5,
+      "outputCostPerMillionTokens": 2.2,
+      "thinkingScore": 8.5,
       "speedScore": 3,
-      "contextWindowTokens": 128000,
-      "maxOutputTokens": 8192,
-      "supportsStructuredOutput": true,
+      "contextWindowTokens": 1048576,
+      "maxOutputTokens": 32768,
+      "supportsStructuredOutput": false,
       "supportsTools": true,
       "supportsVision": false,
       "supportsFileInput": false,
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "nvidia",
@@ -217,11 +217,29 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "nvidia",
-      "model": "mistralai/mistral-nemo-12b-instruct",
+      "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "inputCostPerMillionTokens": 0.06,
+      "outputCostPerMillionTokens": 0.16,
+      "thinkingScore": 5,
+      "speedScore": 9.5,
+      "contextWindowTokens": 1048576,
+      "maxOutputTokens": 32768,
+      "supportsStructuredOutput": true,
+      "supportsTools": true,
+      "supportsVision": false,
+      "supportsFileInput": false,
+      "supportsFileOutput": false,
+      "supportsTemperature": true,
+      "supportsTopP": true,
+      "lastUpdated": "2026-10-05T19:22:14Z"
+    },
+    {
+      "provider": "nvidia",
+      "model": "nv-mistralai/mistral-nemo-12b-instruct",
       "inputCostPerMillionTokens": 0.15,
       "outputCostPerMillionTokens": 0.15,
       "thinkingScore": 4.5,
@@ -235,25 +253,7 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
-    },
-    {
-      "provider": "nvidia",
-      "model": "microsoft/phi-3-mini-4k-instruct",
-      "inputCostPerMillionTokens": 0.04,
-      "outputCostPerMillionTokens": 0.04,
-      "thinkingScore": 3,
-      "speedScore": 9.5,
-      "contextWindowTokens": 4096,
-      "maxOutputTokens": 4096,
-      "supportsStructuredOutput": false,
-      "supportsTools": false,
-      "supportsVision": false,
-      "supportsFileInput": false,
-      "supportsFileOutput": false,
-      "supportsTemperature": true,
-      "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
@@ -271,7 +271,7 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
@@ -289,7 +289,7 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
@@ -299,7 +299,7 @@
       "thinkingScore": 4.5,
       "speedScore": 9,
       "contextWindowTokens": 1050000,
-      "maxOutputTokens": 32768,
+      "maxOutputTokens": 65536,
       "supportsStructuredOutput": true,
       "supportsTools": true,
       "supportsVision": true,
@@ -307,11 +307,11 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
-      "model": "x-ai/grok-4.6",
+      "model": "x-ai/grok-4.7",
       "inputCostPerMillionTokens": 2,
       "outputCostPerMillionTokens": 6,
       "thinkingScore": 9,
@@ -325,7 +325,7 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
@@ -343,13 +343,31 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
+    },
+    {
+      "provider": "openrouter",
+      "model": "meta/muse-spark-1.3",
+      "inputCostPerMillionTokens": 1.25,
+      "outputCostPerMillionTokens": 4.25,
+      "thinkingScore": 8.5,
+      "speedScore": 4,
+      "contextWindowTokens": 1048576,
+      "maxOutputTokens": 32768,
+      "supportsStructuredOutput": true,
+      "supportsTools": true,
+      "supportsVision": true,
+      "supportsFileInput": false,
+      "supportsFileOutput": false,
+      "supportsTemperature": true,
+      "supportsTopP": true,
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
       "model": "meta-llama/llama-4-maverick",
-      "inputCostPerMillionTokens": 0.2,
-      "outputCostPerMillionTokens": 0.696,
+      "inputCostPerMillionTokens": 0.188,
+      "outputCostPerMillionTokens": 0.652,
       "thinkingScore": 7.5,
       "speedScore": 6,
       "contextWindowTokens": 1050000,
@@ -361,17 +379,17 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
       "model": "meta-llama/llama-3.3-70b-instruct",
-      "inputCostPerMillionTokens": 0.1,
-      "outputCostPerMillionTokens": 0.32,
+      "inputCostPerMillionTokens": 0.22,
+      "outputCostPerMillionTokens": 0.5,
       "thinkingScore": 6,
       "speedScore": 6,
       "contextWindowTokens": 131000,
-      "maxOutputTokens": 8192,
+      "maxOutputTokens": 16384,
       "supportsStructuredOutput": true,
       "supportsTools": true,
       "supportsVision": false,
@@ -379,7 +397,7 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
@@ -397,17 +415,17 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
-      "model": "deepseek/deepseek-v4-pro",
-      "inputCostPerMillionTokens": 0.87,
-      "outputCostPerMillionTokens": 1.74,
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "inputCostPerMillionTokens": 0.4,
+      "outputCostPerMillionTokens": 5,
       "thinkingScore": 8.5,
       "speedScore": 4,
-      "contextWindowTokens": 1050000,
-      "maxOutputTokens": 32768,
+      "contextWindowTokens": 1048576,
+      "maxOutputTokens": 384000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
       "supportsVision": false,
@@ -415,25 +433,25 @@
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     },
     {
       "provider": "openrouter",
       "model": "deepseek/deepseek-v4.1-flash",
-      "inputCostPerMillionTokens": 0.15,
-      "outputCostPerMillionTokens": 0.6,
+      "inputCostPerMillionTokens": 0.3,
+      "outputCostPerMillionTokens": 1.2,
       "thinkingScore": 6,
       "speedScore": 8,
-      "contextWindowTokens": 1050000,
-      "maxOutputTokens": 16384,
+      "contextWindowTokens": 1048576,
+      "maxOutputTokens": 384000,
       "supportsStructuredOutput": true,
       "supportsTools": true,
-      "supportsVision": false,
+      "supportsVision": true,
       "supportsFileInput": false,
       "supportsFileOutput": false,
       "supportsTemperature": true,
       "supportsTopP": true,
-      "lastUpdated": "2026-09-14T14:17:23Z"
+      "lastUpdated": "2026-10-05T19:22:14Z"
     }
   ]
 }

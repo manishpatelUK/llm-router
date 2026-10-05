@@ -18,32 +18,32 @@ class ModelSelectorTest {
     // Real seed data: Anthropic thinkingScores are {10, 9, 7.5, 6} (fable-5-1, opus-5,
     // sonnet-5, haiku-4-5). min=6, max=10, range=4. Percentile targets interpolate over that
     // range, then we pick whichever actual model is closest to the target — because the scores
-    // aren't evenly spaced, low and medium both land on sonnet-5 here; that's a real consequence
+    // aren't evenly spaced, low and medium both land on sonnet-5-5 here; that's a real consequence
     // of §7.2's formula against this data, not a bug.
     private static final List<ModelEntry> ANTHROPIC_MODELS = ModelCapabilityTable.listModels(Provider.ANTHROPIC);
 
     @Test
     void mediumPicksClosestToThe50thPercentileTarget() {
-        // target = 6 + 0.50*4 = 8; sonnet-5 (7.5) is closest (distance 0.5) vs opus-5 (distance 1)
+        // target = 6 + 0.50*4 = 8; sonnet-5-5 (7.5) is closest (distance 0.5) vs opus-5-5 (distance 1.5)
         ModelEntry selected = ModelSelector.selectModel(ANTHROPIC_MODELS, ThinkingLevel.MEDIUM);
 
-        assertThat(selected.getModel()).isEqualTo("claude-sonnet-5");
+        assertThat(selected.getModel()).isEqualTo("claude-sonnet-5-5");
     }
 
     @Test
     void lowPicksClosestToThe25thPercentileTarget() {
-        // target = 6 + 0.25*4 = 7; sonnet-5 (7.5, distance 0.5) beats haiku-4-5 (6, distance 1)
+        // target = 6 + 0.25*4 = 7; sonnet-5-5 (7.5, distance 0.5) beats haiku-4-5 (6, distance 1)
         ModelEntry selected = ModelSelector.selectModel(ANTHROPIC_MODELS, ThinkingLevel.LOW);
 
-        assertThat(selected.getModel()).isEqualTo("claude-sonnet-5");
+        assertThat(selected.getModel()).isEqualTo("claude-sonnet-5-5");
     }
 
     @Test
-    void highPicksExactMatchAtThe75thPercentileTarget() {
-        // target = 6 + 0.75*4 = 9; opus-5 matches exactly
+    void highPicksClosestToThe75thPercentileTarget() {
+        // target = 6 + 0.75*4 = 9; opus-5-5 (9.5, distance 0.5) beats fable-5-1 (10, distance 1)
         ModelEntry selected = ModelSelector.selectModel(ANTHROPIC_MODELS, ThinkingLevel.HIGH);
 
-        assertThat(selected.getModel()).isEqualTo("claude-opus-5");
+        assertThat(selected.getModel()).isEqualTo("claude-opus-5-5");
     }
 
     @Test
@@ -55,12 +55,12 @@ class ModelSelectorTest {
 
     @Test
     void qualifyingSetIncludesEverythingWithinOnePointOfTarget() {
-        // target = 10 (max); within 1.0: fable-5-1 (distance 0), opus-5 (distance 1).
-        // sonnet-5 (distance 2.5) and haiku-4-5 (distance 4) are excluded.
+        // target = 10 (max); within 1.0: fable-5-1 (distance 0), opus-5-5 (distance 0.5).
+        // sonnet-5-5 (distance 2.5) and haiku-4-5 (distance 4) are excluded.
         List<ModelEntry> qualifying = ModelSelector.selectQualifyingSet(ANTHROPIC_MODELS, ThinkingLevel.MAX);
 
         assertThat(qualifying).extracting(ModelEntry::getModel)
-                .containsExactlyInAnyOrder("claude-fable-5-1", "claude-opus-5");
+                .containsExactlyInAnyOrder("claude-fable-5-1", "claude-opus-5-5");
     }
 
     @Test
@@ -80,11 +80,11 @@ class ModelSelectorTest {
     void rankByEstimatedCostOrdersAscendingByInputCost() {
         List<ModelEntry> qualifying = ModelSelector.selectQualifyingSet(ANTHROPIC_MODELS, ThinkingLevel.MAX);
 
-        // fable-5-1: $10/1M input, opus-5: $5/1M input -> opus-5 is cheaper for any prompt size
+        // fable-5-1: $10/1M input, opus-5-5: $4/1M input -> opus-5-5 is cheaper for any prompt size
         List<ModelEntry> ranked = ModelSelector.rankByEstimatedCost(qualifying, 1_000_000);
 
         assertThat(ranked).extracting(ModelEntry::getModel)
-                .containsExactly("claude-opus-5", "claude-fable-5-1");
+                .containsExactly("claude-opus-5-5", "claude-fable-5-1");
     }
 
     @Test
