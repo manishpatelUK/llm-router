@@ -68,7 +68,7 @@ class AnthropicAdapterTest {
         when(messageService.create(any(MessageCreateParams.class))).thenReturn(textMessage("Hello there"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        Response response = adapter.send("claude-opus-5", Request.builder().prompt("Hi").build());
+        Response response = adapter.send("claude-opus-5-5", Request.builder().prompt("Hi").build());
 
         assertThat(response.getContent()).isEqualTo("Hello there");
         assertThat(response.getToolCalls()).isEmpty();
@@ -84,13 +84,13 @@ class AnthropicAdapterTest {
         when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder()
+        adapter.send("claude-opus-5-5", Request.builder()
                 .prompt("What's the weather?")
                 .systemInstructions("You are terse.")
                 .build());
 
         MessageCreateParams sent = captor.getValue();
-        assertThat(sent.model().toString()).isEqualTo("claude-opus-5");
+        assertThat(sent.model().toString()).isEqualTo("claude-opus-5-5");
         assertThat(sent.system()).isPresent();
     }
 
@@ -101,7 +101,7 @@ class AnthropicAdapterTest {
         when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
+        adapter.send("claude-opus-5-5", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
 
         assertThat(captor.getValue().temperature()).isEqualTo(java.util.Optional.of(0.7));
         assertThat(captor.getValue().topP()).isEqualTo(java.util.Optional.of(0.9));
@@ -114,7 +114,7 @@ class AnthropicAdapterTest {
         when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder().prompt("hi").build());
+        adapter.send("claude-opus-5-5", Request.builder().prompt("hi").build());
 
         assertThat(captor.getValue().temperature()).isEmpty();
         assertThat(captor.getValue().topP()).isEmpty();
@@ -126,7 +126,7 @@ class AnthropicAdapterTest {
         when(messageService.create(any(MessageCreateParams.class))).thenReturn(toolUseMessage());
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        Response response = adapter.send("claude-opus-5", Request.builder().prompt("lookup something").build());
+        Response response = adapter.send("claude-opus-5-5", Request.builder().prompt("lookup something").build());
 
         assertThat(response.getToolCalls()).hasSize(1);
         assertThat(response.getToolCalls().get(0).getName()).isEqualTo("lookup");
@@ -145,8 +145,8 @@ class AnthropicAdapterTest {
         Attachment attachment = Attachment.builder().mediaType("image/png").data(new byte[]{1, 2, 3}).build();
         Request request = Request.builder().prompt("describe this").attachments(List.of(attachment)).build();
 
-        adapter.send("claude-opus-5", request);
-        adapter.send("claude-opus-5", request);
+        adapter.send("claude-opus-5-5", request);
+        adapter.send("claude-opus-5-5", request);
 
         verify(fileService, times(1)).upload(any(FileUploadParams.class));
 
@@ -168,10 +168,10 @@ class AnthropicAdapterTest {
                 .thenReturn(fixtureFileMetadata("file_two"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder().prompt("p")
+        adapter.send("claude-opus-5-5", Request.builder().prompt("p")
                 .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1}).build()))
                 .build());
-        adapter.send("claude-opus-5", Request.builder().prompt("p")
+        adapter.send("claude-opus-5-5", Request.builder().prompt("p")
                 .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{2}).build()))
                 .build());
 
@@ -187,7 +187,7 @@ class AnthropicAdapterTest {
         when(fileService.upload(any(FileUploadParams.class))).thenReturn(fixtureFileMetadata("file_doc"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder().prompt("summarize")
+        adapter.send("claude-opus-5-5", Request.builder().prompt("summarize")
                 .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).build()))
                 .build());
 
@@ -206,7 +206,7 @@ class AnthropicAdapterTest {
         when(fileService.upload(any(FileUploadParams.class))).thenThrow(new RuntimeException("quota exceeded"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        Response response = adapter.send("claude-opus-5", Request.builder().prompt("describe this")
+        Response response = adapter.send("claude-opus-5-5", Request.builder().prompt("describe this")
                 .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1, 2, 3}).build()))
                 .build());
 
@@ -226,7 +226,7 @@ class AnthropicAdapterTest {
         ToolCall callB = ToolCall.builder().id("call_b").name("convert").arguments(Map.of("amount", 5)).build();
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder()
+        adapter.send("claude-opus-5-5", Request.builder()
                 .prompt("continue")
                 .history(List.of(
                         io.github.manishpateluk.llmrouter.model.Message.assistant("", List.of(callA, callB)),
@@ -265,7 +265,7 @@ class AnthropicAdapterTest {
         when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        adapter.send("claude-opus-5", Request.builder()
+        adapter.send("claude-opus-5-5", Request.builder()
                 .prompt("continue")
                 .history(List.of(io.github.manishpateluk.llmrouter.model.Message.tool("legacy result")))
                 .build());
@@ -298,7 +298,7 @@ class AnthropicAdapterTest {
                 .thenReturn(CompletableFuture.completedFuture(textMessage("async result")));
 
         AnthropicAdapter adapter = new AnthropicAdapter(client);
-        CompletableFuture<Response> future = adapter.sendAsync("claude-opus-5", Request.builder().prompt("hi").build());
+        CompletableFuture<Response> future = adapter.sendAsync("claude-opus-5-5", Request.builder().prompt("hi").build());
 
         assertThat(future.join().getContent()).isEqualTo("async result");
     }
@@ -323,7 +323,7 @@ class AnthropicAdapterTest {
     private static Message.Builder fixtureMessageBuilder(String id) {
         return Message.builder()
                 .id(id)
-                .model("claude-opus-5")
+                .model("claude-opus-5-5")
                 .container(java.util.Optional.empty())
                 .stopDetails(java.util.Optional.empty())
                 .stopReason(java.util.Optional.empty())

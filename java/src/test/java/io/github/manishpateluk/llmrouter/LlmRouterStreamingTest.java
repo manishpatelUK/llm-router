@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class LlmRouterStreamingTest {
 
     private static final RouterConfig ANTHROPIC_THEN_OPENAI = RouterConfig.builder()
-            .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+            .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
             .build();
 
     /** Records what a stream delivered, including resets. */
@@ -249,7 +249,7 @@ class LlmRouterStreamingTest {
         LlmRouter router = new LlmRouter(List.of(adapter(Provider.ANTHROPIC, null, new RuntimeException("down"))));
 
         assertThatThrownBy(() -> router.completeStreaming(Request.builder().prompt("hi")
-                .config(RouterConfig.builder().route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"))).build())
+                .config(RouterConfig.builder().route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"))).build())
                 .build(), delta -> { }))
                 .isInstanceOf(RouterExhaustedException.class);
     }
@@ -264,7 +264,7 @@ class LlmRouterStreamingTest {
 
         router.completeStreaming(request(), delta -> { });
 
-        assertThat(seen).containsExactly("anthropic/claude-opus-5");
+        assertThat(seen).containsExactly("anthropic/claude-opus-5-5");
     }
 
     @Test

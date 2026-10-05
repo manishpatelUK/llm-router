@@ -76,18 +76,18 @@ class LlmRouterTest {
     void firstCandidateSuccessReturnsImmediatelyWithNoAttempts() {
         stubId(anthropic, Provider.ANTHROPIC);
         when(anthropic.isAvailable()).thenReturn(true);
-        when(anthropic.send(eq("claude-opus-5"), any())).thenReturn(fragment("hello"));
+        when(anthropic.send(eq("claude-opus-5-5"), any())).thenReturn(fragment("hello"));
 
         LlmRouter router = new LlmRouter(List.of(anthropic));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5")))
                 .build();
 
         Response response = router.complete("hi", config);
 
         assertThat(response.getContent()).isEqualTo("hello");
         assertThat(response.getProviderUsed()).isEqualTo(Provider.ANTHROPIC);
-        assertThat(response.getModelUsed()).isEqualTo("claude-opus-5");
+        assertThat(response.getModelUsed()).isEqualTo("claude-opus-5-5");
         assertThat(response.getAttempts()).isEmpty();
     }
 
@@ -102,7 +102,7 @@ class LlmRouterTest {
 
         LlmRouter router = new LlmRouter(List.of(anthropic, openai));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
                 .build();
 
         Response response = router.complete("hi", config);
@@ -120,11 +120,11 @@ class LlmRouterTest {
         stubId(anthropic, Provider.ANTHROPIC);
         when(anthropic.isAvailable()).thenReturn(true);
         ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
-        when(anthropic.send(eq("claude-opus-5"), captor.capture())).thenReturn(fragment("hello"));
+        when(anthropic.send(eq("claude-opus-5-5"), captor.capture())).thenReturn(fragment("hello"));
 
         LlmRouter router = new LlmRouter(List.of(anthropic)); // no interceptor supplied
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5")))
                 .build();
 
         Response response = router.complete("hi", config);
@@ -150,13 +150,13 @@ class LlmRouterTest {
 
         LlmRouter router = new LlmRouter(List.of(anthropic, openai), interceptor);
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
                 .build();
 
         Response response = router.complete("hi", config);
 
         assertThat(response.getContent()).isEqualTo("recovered");
-        assertThat(seenCandidates).containsExactly("anthropic/claude-opus-5", "openai/gpt-6-astra");
+        assertThat(seenCandidates).containsExactly("anthropic/claude-opus-5-5", "openai/gpt-6-astra");
     }
 
     @Test
@@ -164,13 +164,13 @@ class LlmRouterTest {
         stubId(anthropic, Provider.ANTHROPIC);
         when(anthropic.isAvailable()).thenReturn(true);
         ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
-        when(anthropic.send(eq("claude-opus-5"), captor.capture())).thenReturn(fragment("ok"));
+        when(anthropic.send(eq("claude-opus-5-5"), captor.capture())).thenReturn(fragment("ok"));
 
         RequestInterceptor trimPrompt = (provider, model, request) -> request.toBuilder().prompt("trimmed").build();
 
         LlmRouter router = new LlmRouter(List.of(anthropic), trimPrompt);
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5")))
                 .build();
 
         router.complete("original prompt", config);
@@ -183,14 +183,14 @@ class LlmRouterTest {
         stubId(anthropic, Provider.ANTHROPIC);
         when(anthropic.isAvailable()).thenReturn(true);
         ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
-        when(anthropic.sendAsync(eq("claude-opus-5"), captor.capture()))
+        when(anthropic.sendAsync(eq("claude-opus-5-5"), captor.capture()))
                 .thenReturn(CompletableFuture.completedFuture(fragment("async ok")));
 
         RequestInterceptor trimPrompt = (provider, model, request) -> request.toBuilder().prompt("trimmed-async").build();
 
         LlmRouter router = new LlmRouter(List.of(anthropic), trimPrompt);
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5")))
                 .build();
 
         Response response = router.completeAsync("original", config).join();
@@ -216,7 +216,7 @@ class LlmRouterTest {
 
         LlmRouter router = new LlmRouter(List.of(anthropic, openai), throwsForAnthropic);
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
                 .build();
 
         Response response = router.complete("hi", config);
@@ -239,7 +239,7 @@ class LlmRouterTest {
 
         LlmRouter router = new LlmRouter(List.of(anthropic, openai));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
                 .build();
 
         Response response = router.complete("hi", config);
@@ -257,7 +257,7 @@ class LlmRouterTest {
 
         LlmRouter router = new LlmRouter(List.of(anthropic));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5")))
                 .build();
 
         assertThatThrownBy(() -> router.complete("hi", config))
@@ -506,7 +506,7 @@ class LlmRouterTest {
 
         LlmRouter router = new LlmRouter(List.of(anthropic, openai));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
                 .build();
 
         Response response = router.completeAsync("hi", config).join();
@@ -520,11 +520,11 @@ class LlmRouterTest {
     void callbackStyleAsyncInvokesOnSuccess() {
         stubId(anthropic, Provider.ANTHROPIC);
         when(anthropic.isAvailable()).thenReturn(true);
-        when(anthropic.sendAsync(eq("claude-opus-5"), any())).thenReturn(CompletableFuture.completedFuture(fragment("callback ok")));
+        when(anthropic.sendAsync(eq("claude-opus-5-5"), any())).thenReturn(CompletableFuture.completedFuture(fragment("callback ok")));
 
         LlmRouter router = new LlmRouter(List.of(anthropic));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5-5")))
                 .build();
         Request request = Request.builder().prompt("hi").config(config).build();
 

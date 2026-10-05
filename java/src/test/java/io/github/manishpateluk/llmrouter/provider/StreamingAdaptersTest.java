@@ -59,7 +59,7 @@ class StreamingAdaptersTest {
         AnthropicAdapter adapter = new AnthropicAdapter(AnthropicOkHttpClient.builder().apiKey("test").baseUrl(base).build());
         List<String> deltas = new ArrayList<>();
 
-        Response response = adapter.sendStreaming("claude-opus-5", Request.builder().prompt("Hi").build(), deltas::add);
+        Response response = adapter.sendStreaming("claude-opus-5-5", Request.builder().prompt("Hi").build(), deltas::add);
 
         assertThat(deltas).containsExactly("Hel", "lo there");
         assertThat(response.getContent()).isEqualTo("Hello there");
@@ -80,7 +80,7 @@ class StreamingAdaptersTest {
         Thread caller = Thread.currentThread();
         List<Thread> deliveringThreads = new CopyOnWriteArrayList<>();
 
-        Response response = adapter.sendStreamingAsync("claude-opus-5", Request.builder().prompt("Hi").build(), delta -> {
+        Response response = adapter.sendStreamingAsync("claude-opus-5-5", Request.builder().prompt("Hi").build(), delta -> {
             deliveringThreads.add(Thread.currentThread());
             deltas.add(delta);
         }).join();
@@ -101,7 +101,7 @@ class StreamingAdaptersTest {
         AnthropicAdapter adapter = new AnthropicAdapter(AnthropicOkHttpClient.builder().apiKey("test").baseUrl(base).build());
         List<String> deltas = new ArrayList<>();
 
-        Response response = adapter.sendStreaming("claude-opus-5", Request.builder().prompt("Weather?")
+        Response response = adapter.sendStreaming("claude-opus-5-5", Request.builder().prompt("Weather?")
                 .tools(List.of(ToolDefinition.builder().name("lookup").description("d").parameters(Map.of("type", "object")).build()))
                 .build(), deltas::add);
 
@@ -137,7 +137,7 @@ class StreamingAdaptersTest {
     /** Wraps content events in Anthropic's message_start ... message_stop envelope, each with its {@code event:} line as the real API sends. */
     private static String anthropicEvents(String... contentEvents) {
         StringBuilder out = new StringBuilder(anthropicEvent("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\","
-                + "\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,"
+                + "\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,"
                 + "\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}"));
         for (String contentEvent : contentEvents) {
             out.append(anthropicEvent(contentEvent));
