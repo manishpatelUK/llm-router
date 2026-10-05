@@ -36,10 +36,11 @@ import io.github.manishpateluk.llmrouter.provider.compatible.HttpTransport.HttpR
  *
  * <p>Known scope limits (documented rather than silently guessed at): the unified
  * {@code Message} history shape (§3) carries no tool-call id, so a {@code TOOL}-role history
- * entry is sent as a plain user-role message; attachments are mapped only for {@code image/*}
- * media types (the {@code image_url} content-part convention shared by every OpenAI-compatible
- * API) — non-image document attachments aren't mapped for these four providers, since there's
- * no single convention for them the way there is for images; {@code Response.generatedFiles} is
+ * entry is sent as a plain user-role message; {@code image/*} attachments are mapped to the
+ * {@code image_url} content-part convention shared by every OpenAI-compatible API, while non-image
+ * document attachments are sent only by subclasses that opt in via
+ * {@link #supportsDocumentAttachments()} (OpenRouter's {@code file} content part) — the others
+ * document no convention for them, so documents aren't sent there; {@code Response.generatedFiles} is
  * always left empty, since none of these four providers document a file-generation mechanism.
  * Unlike {@code AnthropicAdapter}/{@code OpenAiAdapter}, attachments here are always re-embedded
  * inline on every call — none of these four vendors' OpenAI-compatible endpoints share a common,
@@ -138,15 +139,32 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         }
 
         List<Attachment> imageAttachments = request.getAttachments().stream()
-                .filter(a -> a.getMediaType() != null && a.getMediaType().startsWith("image/"))
+                .filter(OpenAiCompatibleHttpAdapter::isImage)
                 .toList();
-        if (imageAttachments.isEmpty()) {
+        List<Attachment> documentAttachments = supportsDocumentAttachments()
+                ? request.getAttachments().stream().filter(a -> !isImage(a)).toList()
+                : List.of();
+        if (imageAttachments.isEmpty() && documentAttachments.isEmpty()) {
             messages.add(simpleMessage("user", request.getPrompt()));
         } else {
-            messages.add(userMessageWithImages(request.getPrompt(), imageAttachments));
+            messages.add(userMessageWithAttachments(request.getPrompt(), imageAttachments, documentAttachments));
         }
 
         return messages;
+    }
+
+    /**
+     * Whether this provider accepts non-image document attachments (PDFs etc.) as OpenRouter-style
+     * {@code {"type": "file", "file": {"filename", "file_data"}}} content parts. Off by default:
+     * only override it for a provider that documents that convention, since the others would
+     * reject or ignore the part.
+     */
+    protected boolean supportsDocumentAttachments() {
+        return false;
+    }
+
+    private static boolean isImage(Attachment attachment) {
+        return attachment.getMediaType() != null && attachment.getMediaType().startsWith("image/");
     }
 
     private static String buildSystemInstructions(Request request) {
@@ -172,7 +190,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         return node;
     }
 
-    private ObjectNode userMessageWithImages(String prompt, List<Attachment> images) {
+    private ObjectNode userMessageWithAttachments(String prompt, List<Attachment> images, List<Attachment> documents) {
         ObjectNode node = MAPPER.createObjectNode();
         node.put("role", "user");
         ArrayNode parts = node.putArray("content");
@@ -189,6 +207,17 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
             String base64Data = Base64.getEncoder().encodeToString(image.getData());
             imageUrl.put("url", "data:" + image.getMediaType() + ";base64," + base64Data);
             parts.add(imagePart);
+        }
+
+        for (int i = 0; i < documents.size(); i++) {
+            Attachment document = documents.get(i);
+            ObjectNode filePart = MAPPER.createObjectNode();
+            filePart.put("type", "file");
+            ObjectNode file = filePart.putObject("file");
+            file.put("filename", document.getFilename() != null ? document.getFilename() : "document-" + (i + 1));
+            String base64Data = Base64.getEncoder().encodeToString(document.getData());
+            file.put("file_data", "data:" + document.getMediaType() + ";base64," + base64Data);
+            parts.add(filePart);
         }
 
         return node;

@@ -128,6 +128,47 @@ class OpenAiCompatibleHttpAdapterTest {
     }
 
     @Test
+    void openRouterSendsDocumentAttachmentsAsFileContentParts() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        OpenRouterAdapter adapter = new OpenRouterAdapter("key", transport);
+        adapter.send("google/gemini-3.8-flash", Request.builder()
+                .prompt("summarise these")
+                .attachments(List.of(
+                        Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).filename("report.pdf").build(),
+                        Attachment.builder().mediaType("image/png").data(new byte[]{4}).build(),
+                        Attachment.builder().mediaType("text/csv").data(new byte[]{5}).build()))
+                .build());
+
+        JsonNode parts = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0).path("content");
+        assertThat(parts).hasSize(4);
+        assertThat(parts.get(0).path("type").asText()).isEqualTo("text");
+        assertThat(parts.get(1).path("type").asText()).isEqualTo("image_url");
+        assertThat(parts.get(2).path("type").asText()).isEqualTo("file");
+        assertThat(parts.get(2).path("file").path("filename").asText()).isEqualTo("report.pdf");
+        assertThat(parts.get(2).path("file").path("file_data").asText()).isEqualTo("data:application/pdf;base64,AQID");
+        assertThat(parts.get(3).path("file").path("filename").asText()).isEqualTo("document-2");
+        assertThat(parts.get(3).path("file").path("file_data").asText()).startsWith("data:text/csv;base64,");
+    }
+
+    @Test
+    void providersWithoutADocumentConventionStillSendOnlyImages() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
+        adapter.send("sonar-pro", Request.builder()
+                .prompt("read this")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1}).build()))
+                .build());
+
+        JsonNode message = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0);
+        assertThat(message.path("content").isString()).isTrue();
+        assertThat(message.path("content").asText()).isEqualTo("read this");
+    }
+
+    @Test
     void sendMapsToolCallsFromResponse() {
         when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
                 {

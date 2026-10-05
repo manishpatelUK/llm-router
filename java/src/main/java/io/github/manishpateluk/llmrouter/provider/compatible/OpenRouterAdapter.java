@@ -24,4 +24,13 @@ public final class OpenRouterAdapter extends OpenAiCompatibleHttpAdapter {
     protected String chatCompletionsUrl() {
         return CHAT_COMPLETIONS_URL;
     }
+
+    /**
+     * OpenRouter accepts PDFs and other documents as {@code file} content parts on any model:
+     * natively where the model supports files, otherwise through its own PDF parser.
+     */
+    @Override
+    protected boolean supportsDocumentAttachments() {
+        return true;
+    }
 }
