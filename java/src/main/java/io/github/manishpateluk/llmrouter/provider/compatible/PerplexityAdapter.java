@@ -24,4 +24,13 @@ public final class PerplexityAdapter extends OpenAiCompatibleHttpAdapter {
     protected String chatCompletionsUrl() {
         return CHAT_COMPLETIONS_URL;
     }
+
+    /**
+     * Perplexity doesn't document {@code stream_options}, so streaming requests don't send it;
+     * usage is read from whichever streamed chunk reports it.
+     */
+    @Override
+    protected boolean requestsStreamUsage() {
+        return false;
+    }
 }

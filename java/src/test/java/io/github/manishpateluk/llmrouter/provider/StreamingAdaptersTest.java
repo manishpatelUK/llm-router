@@ -8,6 +8,9 @@ import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.ToolDefinition;
 import io.github.manishpateluk.llmrouter.provider.anthropic.AnthropicAdapter;
+import io.github.manishpateluk.llmrouter.provider.compatible.JdkHttpTransport;
+import io.github.manishpateluk.llmrouter.provider.compatible.OpenAiCompatibleHttpAdapter;
+import io.github.manishpateluk.llmrouter.provider.compatible.ProviderHttpException;
 import io.github.manishpateluk.llmrouter.provider.openai.OpenAiAdapter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,10 +27,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * The native streaming paths of the Anthropic and OpenAI adapters, exercised through the real SDK
- * clients against a local server replaying each provider's server-sent-event wire format.
+ * The native streaming paths of the Anthropic and OpenAI adapters (through their real SDK clients)
+ * and of the shared OpenAI-compatible HTTP adapter (through the real JDK transport), against a
+ * local server replaying each provider's server-sent-event wire format.
  */
 class StreamingAdaptersTest {
 
@@ -35,6 +40,7 @@ class StreamingAdaptersTest {
     private String base;
     private final AtomicReference<String> requestBody = new AtomicReference<>();
     private volatile String sse;
+    private volatile int status = 200;
 
     @BeforeEach
     void startServer() throws IOException {
@@ -134,6 +140,88 @@ class StreamingAdaptersTest {
         assertThat(requestBody.get()).contains("\"stream\":true", "\"include_usage\":true");
     }
 
+    // ---- OpenAI-compatible HTTP adapter (Perplexity, NVIDIA, Hugging Face, OpenRouter) ----
+
+    @Test
+    void compatibleAdapterStreamsTextDeltasAndReadsUsageFromTheFinalChunk() {
+        sse = ": OPENROUTER PROCESSING\n\n"
+                + event("{\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}")
+                + event("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}")
+                + event("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo there\"},\"finish_reason\":\"stop\"}]}")
+                + event("{\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}")
+                + event("[DONE]");
+        List<String> deltas = new ArrayList<>();
+
+        Response response = compatibleAdapter().sendStreaming("some/model", Request.builder().prompt("Hi").build(), deltas::add);
+
+        assertThat(deltas).containsExactly("Hel", "lo there");
+        assertThat(response.getContent()).isEqualTo("Hello there");
+        assertThat(response.getUsage().getInputTokens()).isEqualTo(12);
+        assertThat(response.getUsage().getOutputTokens()).isEqualTo(4);
+        assertThat(requestBody.get()).contains("\"stream\":true", "\"include_usage\":true");
+    }
+
+    @Test
+    void compatibleAdapterAssemblesToolCallsStreamedAsFragments() {
+        sse = event("{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\","
+                        + "\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}")
+                + event("{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]}}]}")
+                + event("{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\","
+                        + "\"function\":{\"name\":\"now\",\"arguments\":\"{}\"}}]}}]}")
+                + event("{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" \\\"Paris\\\"}\"}}]}}]}")
+                + event("[DONE]");
+        List<String> deltas = new ArrayList<>();
+
+        Response response = compatibleAdapter().sendStreaming("some/model", Request.builder().prompt("Weather?").build(), deltas::add);
+
+        assertThat(deltas).isEmpty();
+        assertThat(response.getToolCalls()).hasSize(2);
+        assertThat(response.getToolCalls().get(0).getId()).isEqualTo("call_1");
+        assertThat(response.getToolCalls().get(0).getName()).isEqualTo("lookup");
+        assertThat(response.getToolCalls().get(0).getArguments()).containsEntry("city", "Paris");
+        assertThat(response.getToolCalls().get(1).getName()).isEqualTo("now");
+        assertThat(response.getToolCalls().get(1).getArguments()).isEmpty();
+    }
+
+    @Test
+    void compatibleAdapterRaisesAnHttpErrorWithItsBodyAndStreamsNothing() {
+        status = 429;
+        sse = "{\"error\":{\"message\":\"rate limited\"}}";
+        List<String> deltas = new ArrayList<>();
+
+        assertThatThrownBy(() -> compatibleAdapter().sendStreaming("some/model", Request.builder().prompt("Hi").build(), deltas::add))
+                .isInstanceOf(ProviderHttpException.class)
+                .hasMessageContaining("429")
+                .hasMessageContaining("rate limited");
+        assertThat(deltas).isEmpty();
+    }
+
+    @Test
+    void compatibleAdapterFailsOnAnErrorReportedMidStream() {
+        sse = event("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Partial\"}}]}")
+                + event("{\"error\":{\"code\":502,\"message\":\"upstream disconnected\"}}");
+        List<String> deltas = new ArrayList<>();
+
+        assertThatThrownBy(() -> compatibleAdapter().sendStreaming("some/model", Request.builder().prompt("Hi").build(), deltas::add))
+                .hasMessageContaining("upstream disconnected");
+        assertThat(deltas).containsExactly("Partial");
+    }
+
+    /** The shared OpenAI-compatible adapter over the real JDK transport, pointed at the local server. */
+    private OpenAiCompatibleHttpAdapter compatibleAdapter() {
+        return new OpenAiCompatibleHttpAdapter("test", new JdkHttpTransport()) {
+            @Override
+            public Provider id() {
+                return Provider.OPENROUTER;
+            }
+
+            @Override
+            protected String chatCompletionsUrl() {
+                return base + "/chat/completions";
+            }
+        };
+    }
+
     /** Wraps content events in Anthropic's message_start ... message_stop envelope, each with its {@code event:} line as the real API sends. */
     private static String anthropicEvents(String... contentEvents) {
         StringBuilder out = new StringBuilder(anthropicEvent("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\","
@@ -161,7 +249,7 @@ class StreamingAdaptersTest {
         requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
         byte[] bytes = sse.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
-        exchange.sendResponseHeaders(200, bytes.length);
+        exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
     }

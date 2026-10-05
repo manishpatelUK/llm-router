@@ -6,7 +6,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
@@ -95,7 +97,48 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         }
     }
 
+    /**
+     * Streams the chat completion as server-sent events: each text delta goes to {@code onText}
+     * as it arrives, while tool-call fragments and usage are accumulated into the same response
+     * fragment {@link #send} would return. {@code original} holds every streamed chunk, in order.
+     */
+    @Override
+    public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
+        requireAvailable();
+        ObjectNode body = buildBody(model, adaptedRequest);
+        body.put("stream", true);
+        if (requestsStreamUsage()) {
+            body.putObject("stream_options").put("include_usage", true);
+        }
+        StreamAccumulator accumulator = new StreamAccumulator(onText);
+        HttpResponseRecord status = transport.sendStreaming(toHttpRequest(body), accumulator::acceptLine);
+        if (status.statusCode() >= 300) {
+            throw new ProviderHttpException(status.statusCode(), status.body());
+        }
+        return accumulator.toResponse();
+    }
+
+    /**
+     * Whether a streaming request should ask for token usage in the final chunk via the
+     * OpenAI-standard {@code stream_options: {"include_usage": true}}. On by default; a provider
+     * that doesn't document the option overrides this to {@code false}, and its usage is then
+     * taken from whatever chunk reports it, or left at zero if none does.
+     */
+    protected boolean requestsStreamUsage() {
+        return true;
+    }
+
     private HttpRequestRecord buildHttpRequest(String model, Request request) {
+        return toHttpRequest(buildBody(model, request));
+    }
+
+    private HttpRequestRecord toHttpRequest(ObjectNode body) {
+        Map<String, String> headers = new LinkedHashMap<>(authHeaders(apiKey));
+        headers.put("Content-Type", "application/json");
+        return new HttpRequestRecord(chatCompletionsUrl(), headers, body.toString());
+    }
+
+    private ObjectNode buildBody(String model, Request request) {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         body.set("messages", buildMessages(request));
@@ -115,10 +158,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
             body.set("response_format", buildResponseFormat(request.getResponseSchema()));
         }
 
-        Map<String, String> headers = new LinkedHashMap<>(authHeaders(apiKey));
-        headers.put("Content-Type", "application/json");
-
-        return new HttpRequestRecord(chatCompletionsUrl(), headers, body.toString());
+        return body;
     }
 
     private ArrayNode buildMessages(Request request) {
@@ -272,6 +312,93 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
                         .build())
                 .original(root)
                 .build();
+    }
+
+    /**
+     * Folds a chat-completions SSE stream back into one response: {@code data:} lines carry JSON
+     * chunks, {@code data: [DONE]} ends the stream, and anything else (blank separators, {@code :}
+     * keep-alive comments) is ignored. Tool calls arrive as fragments keyed by {@code index}, with
+     * the id and name in the first fragment and the arguments JSON split across the rest.
+     */
+    private final class StreamAccumulator {
+
+        private final Consumer<String> onText;
+        private final StringBuilder content = new StringBuilder();
+        private final Map<Integer, StreamedToolCall> toolCalls = new TreeMap<>();
+        private final ArrayNode chunks = MAPPER.createArrayNode();
+        private JsonNode usage = MAPPER.missingNode();
+
+        StreamAccumulator(Consumer<String> onText) {
+            this.onText = onText;
+        }
+
+        void acceptLine(String line) {
+            if (!line.startsWith("data:")) {
+                return;
+            }
+            String data = line.substring("data:".length()).trim();
+            if (data.isEmpty() || data.equals("[DONE]")) {
+                return;
+            }
+            JsonNode chunk = readTree(data);
+            chunks.add(chunk);
+            if (chunk.has("error")) {
+                throw new IllegalStateException("Provider reported an error mid-stream: " + chunk.path("error"));
+            }
+            if (chunk.path("usage").isObject()) {
+                usage = chunk.path("usage");
+            }
+            JsonNode delta = chunk.path("choices").path(0).path("delta");
+            String text = delta.path("content").asText("");
+            if (!text.isEmpty()) {
+                content.append(text);
+                onText.accept(text);
+            }
+            for (JsonNode fragment : delta.path("tool_calls")) {
+                toolCalls.computeIfAbsent(fragment.path("index").asInt(toolCalls.size()), i -> new StreamedToolCall())
+                        .accept(fragment);
+            }
+        }
+
+        Response toResponse() {
+            return Response.builder()
+                    .content(content.toString())
+                    .toolCalls(toolCalls.values().stream().map(StreamedToolCall::toToolCall).toList())
+                    .usage(Usage.builder()
+                            .inputTokens(usage.path("prompt_tokens").asInt(0))
+                            .outputTokens(usage.path("completion_tokens").asInt(0))
+                            .reasoningTokens(0)
+                            .estimatedCostUsdCents(0) // finalized by the router core against the capability table
+                            .build())
+                    .original(chunks)
+                    .build();
+        }
+    }
+
+    private final class StreamedToolCall {
+
+        private String id;
+        private String name;
+        private final StringBuilder arguments = new StringBuilder();
+
+        void accept(JsonNode fragment) {
+            if (fragment.hasNonNull("id")) {
+                id = fragment.path("id").asText();
+            }
+            JsonNode function = fragment.path("function");
+            if (function.hasNonNull("name")) {
+                name = function.path("name").asText();
+            }
+            arguments.append(function.path("arguments").asText(""));
+        }
+
+        ToolCall toToolCall() {
+            return ToolCall.builder()
+                    .id(id)
+                    .name(name)
+                    .arguments(parseArguments(arguments.isEmpty() ? "{}" : arguments.toString()))
+                    .build();
+        }
     }
 
     private List<ToolCall> parseToolCalls(JsonNode toolCallsNode) {

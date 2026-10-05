@@ -8,6 +8,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Real {@link HttpTransport} implementation on the JDK's built-in {@link HttpClient} — no extra
@@ -44,6 +47,26 @@ public final class JdkHttpTransport implements HttpTransport {
     public CompletableFuture<HttpResponseRecord> sendAsync(HttpRequestRecord request) {
         return client.sendAsync(toJdkRequest(request), HttpResponse.BodyHandlers.ofString())
                 .thenApply(response -> new HttpResponseRecord(response.statusCode(), response.body()));
+    }
+
+    /** Streams the body with {@link HttpResponse.BodyHandlers#ofLines()}, delivering each line as it arrives. */
+    @Override
+    public HttpResponseRecord sendStreaming(HttpRequestRecord request, Consumer<String> onLine) {
+        try {
+            HttpResponse<Stream<String>> response = client.send(toJdkRequest(request), HttpResponse.BodyHandlers.ofLines());
+            try (Stream<String> lines = response.body()) {
+                if (response.statusCode() >= 300) {
+                    return new HttpResponseRecord(response.statusCode(), lines.collect(Collectors.joining("\n")));
+                }
+                lines.forEach(onLine);
+            }
+            return new HttpResponseRecord(response.statusCode(), "");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for HTTP response", e);
+        }
     }
 
     private static HttpRequest toJdkRequest(HttpRequestRecord request) {

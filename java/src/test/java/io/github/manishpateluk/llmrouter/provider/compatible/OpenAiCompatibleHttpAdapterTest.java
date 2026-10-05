@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -166,6 +168,42 @@ class OpenAiCompatibleHttpAdapterTest {
         JsonNode message = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0);
         assertThat(message.path("content").isString()).isTrue();
         assertThat(message.path("content").asText()).isEqualTo("read this");
+    }
+
+    @Test
+    void perplexityStreamsWithoutAskingForStreamOptionsAndReadsUsageWhereverItAppears() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.sendStreaming(captor.capture(), any())).thenAnswer(invocation -> {
+            Consumer<String> onLine = invocation.getArgument(1);
+            onLine.accept("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}");
+            onLine.accept("data: [DONE]");
+            return new HttpResponseRecord(200, "");
+        });
+        List<String> deltas = new ArrayList<>();
+
+        Response response = new PerplexityAdapter("key", transport).sendStreaming("sonar", Request.builder().prompt("Hey").build(), deltas::add);
+
+        JsonNode body = JSON.readTree(captor.getValue().jsonBody());
+        assertThat(body.path("stream").asBoolean()).isTrue();
+        assertThat(body.has("stream_options")).isFalse();
+        assertThat(deltas).containsExactly("Hi");
+        assertThat(response.getUsage().getInputTokens()).isEqualTo(3);
+        assertThat(response.getUsage().getOutputTokens()).isEqualTo(1);
+    }
+
+    @Test
+    void transportDefaultStreamingReplaysABufferedBodyLineByLine() {
+        HttpTransport buffered = request -> new HttpResponseRecord(200, "data: one\n\ndata: two\n");
+        HttpTransport failing = request -> new HttpResponseRecord(500, "boom");
+        List<String> lines = new ArrayList<>();
+
+        HttpResponseRecord ok = buffered.sendStreaming(new HttpRequestRecord("u", Map.of(), "{}"), lines::add);
+        HttpResponseRecord error = failing.sendStreaming(new HttpRequestRecord("u", Map.of(), "{}"), lines::add);
+
+        assertThat(lines).containsExactly("data: one", "", "data: two");
+        assertThat(ok.statusCode()).isEqualTo(200);
+        assertThat(error.statusCode()).isEqualTo(500);
+        assertThat(error.body()).isEqualTo("boom");
     }
 
     @Test

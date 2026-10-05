@@ -179,7 +179,7 @@ Response response = router.completeStreaming(request, new StreamListener() {
 // response.getContent() is the full text; tool calls, usage etc. are on the response as usual.
 ```
 
-Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. Anthropic and OpenAI stream natively. Other providers deliver their text in one piece, so the call works everywhere. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
+Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. All six built-in providers stream natively. A custom `ProviderAdapter` that doesn't override `sendStreaming` delivers its text in one piece, so the call works with any adapter. Perplexity reports token usage only if its stream happens to include it, since its API doesn't document an option to ask for it. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
 
 `completeStreamingAsync(request, listener)` is the non-blocking form. It returns a `CompletableFuture<Response>` and follows the same rules. The listener is called from a background thread, one piece at a time and in order, so hand the text to your UI thread if your toolkit requires it:
 
