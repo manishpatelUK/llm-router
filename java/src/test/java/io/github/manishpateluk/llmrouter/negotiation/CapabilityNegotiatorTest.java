@@ -1,0 +1,297 @@
+package io.github.manishpateluk.llmrouter.negotiation;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import io.github.manishpateluk.llmrouter.capability.ModelEntry;
+import io.github.manishpateluk.llmrouter.config.Feature;
+import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
+import io.github.manishpateluk.llmrouter.model.Attachment;
+import io.github.manishpateluk.llmrouter.model.Request;
+import io.github.manishpateluk.llmrouter.model.ToolDefinition;
+import io.github.manishpateluk.llmrouter.provider.Provider;
+
+import org.junit.jupiter.api.Test;
+
+class CapabilityNegotiatorTest {
+
+    private static final Map<String, Object> SCHEMA = Map.of("type", "object", "properties", Map.of());
+
+    @Test
+    void requestWithNoOptionalFeaturesHasNothingDropped() {
+        Request request = Request.builder().prompt("hello").build();
+        ModelEntry model = fixture(false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.isStructuredOutputViaPromptFallback()).isFalse();
+        assertThat(result.getAdaptedRequest().getPrompt()).isEqualTo("hello");
+    }
+
+    @Test
+    void schemaSentNativelyWhenSupportedRegardlessOfStrategy() {
+        Request request = Request.builder().prompt("p").responseSchema(SCHEMA).build();
+        ModelEntry model = fixture(true, false, false, false);
+
+        for (StructuredOutputStrategy strategy : StructuredOutputStrategy.values()) {
+            NegotiationResult result = CapabilityNegotiator.negotiate(model, request, strategy);
+
+            assertThat(result.getDroppedFeatures()).isEmpty();
+            assertThat(result.isStructuredOutputViaPromptFallback()).isFalse();
+            assertThat(result.getAdaptedRequest().getResponseSchema()).isEqualTo(SCHEMA);
+        }
+    }
+
+    @Test
+    void schemaDroppedUnderNativeStrategyWhenUnsupported() {
+        Request request = Request.builder().prompt("p").responseSchema(SCHEMA).build();
+        ModelEntry model = fixture(false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.NATIVE);
+
+        assertThat(result.getDroppedFeatures()).containsExactly("responseSchema");
+        assertThat(result.isStructuredOutputViaPromptFallback()).isFalse();
+        assertThat(result.getAdaptedRequest().getResponseSchema()).isNull();
+    }
+
+    @Test
+    void schemaInjectedAsPromptFallbackWhenUnsupportedUnderPromptFallbackStrategy() {
+        Request request = Request.builder().prompt("p").systemInstructions("Be nice.").responseSchema(SCHEMA).build();
+        ModelEntry model = fixture(false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.PROMPT_FALLBACK);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.isStructuredOutputViaPromptFallback()).isTrue();
+        assertThat(result.getAdaptedRequest().getResponseSchema()).isNull();
+        assertThat(result.getAdaptedRequest().getSystemInstructions())
+                .startsWith("Be nice.")
+                .contains("JSON")
+                .contains("\"type\"");
+    }
+
+    @Test
+    void autoStrategyBehavesLikePromptFallbackWhenUnsupported() {
+        Request request = Request.builder().prompt("p").responseSchema(SCHEMA).build();
+        ModelEntry model = fixture(false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO);
+
+        assertThat(result.isStructuredOutputViaPromptFallback()).isTrue();
+        assertThat(result.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void toolsKeptWhenSupportedDroppedWhenNot() {
+        Request request = Request.builder().prompt("p")
+                .tools(List.of(ToolDefinition.builder()
+                        .name("lookup").description("d").parameters(Map.of()).build()))
+                .build();
+
+        NegotiationResult supported = CapabilityNegotiator.negotiate(fixture(false, true, false, false), request, StructuredOutputStrategy.AUTO);
+        assertThat(supported.getDroppedFeatures()).isEmpty();
+        assertThat(supported.getAdaptedRequest().getTools()).hasSize(1);
+
+        NegotiationResult unsupported = CapabilityNegotiator.negotiate(fixture(false, false, false, false), request, StructuredOutputStrategy.AUTO);
+        assertThat(unsupported.getDroppedFeatures()).containsExactly("tools");
+        assertThat(unsupported.getAdaptedRequest().getTools()).isEmpty();
+    }
+
+    @Test
+    void imageAttachmentGatedBySupportsVision() {
+        Request request = Request.builder().prompt("p")
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1}).build()))
+                .build();
+
+        NegotiationResult supported = CapabilityNegotiator.negotiate(fixture(false, false, true, false), request, StructuredOutputStrategy.AUTO);
+        assertThat(supported.getDroppedFeatures()).isEmpty();
+
+        NegotiationResult unsupported = CapabilityNegotiator.negotiate(fixture(false, false, false, false), request, StructuredOutputStrategy.AUTO);
+        assertThat(unsupported.getDroppedFeatures()).containsExactly("attachments");
+        assertThat(unsupported.getAdaptedRequest().getAttachments()).isEmpty();
+    }
+
+    @Test
+    void documentAttachmentGatedBySupportsFileInputNotVision() {
+        Request request = Request.builder().prompt("p")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1}).build()))
+                .build();
+
+        // Vision support alone does not cover a non-image document attachment
+        ModelEntry visionOnly = fixture(false, false, true, false);
+        NegotiationResult droppedForVisionOnly = CapabilityNegotiator.negotiate(visionOnly, request, StructuredOutputStrategy.AUTO);
+        assertThat(droppedForVisionOnly.getDroppedFeatures()).containsExactly("attachments");
+
+        ModelEntry fileInputCapable = fixture(false, false, false, true);
+        NegotiationResult kept = CapabilityNegotiator.negotiate(fileInputCapable, request, StructuredOutputStrategy.AUTO);
+        assertThat(kept.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void mixedAttachmentsDropWholeListIfAnyUnsupported() {
+        Request request = Request.builder().prompt("p")
+                .attachments(List.of(
+                        Attachment.builder().mediaType("image/png").data(new byte[]{1}).build(),
+                        Attachment.builder().mediaType("application/pdf").data(new byte[]{2}).build()))
+                .build();
+        // Supports vision but not general file input -> the PDF can't be sent, so the whole list drops
+        ModelEntry model = fixture(false, false, true, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO);
+
+        assertThat(result.getDroppedFeatures()).containsExactly("attachments");
+        assertThat(result.getAdaptedRequest().getAttachments()).isEmpty();
+    }
+
+    @Test
+    void onlyTemperatureRequestedSentWhenSupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, true, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, null);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.getAdaptedRequest().getTemperature()).isEqualTo(0.7);
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void onlyTopPRequestedSentWhenSupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, true, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, null, 0.9);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isEqualTo(0.9);
+    }
+
+    @Test
+    void temperaturePreferredOverTopPWhenBothRequestedAndBothSupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, true, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, 0.9);
+
+        assertThat(result.getDroppedFeatures()).containsExactly("topP");
+        assertThat(result.getAdaptedRequest().getTemperature()).isEqualTo(0.7);
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void topPUsedWhenBothRequestedButModelOnlySupportsTopP() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, false, true);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, 0.9);
+
+        assertThat(result.getDroppedFeatures()).containsExactly("temperature");
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isEqualTo(0.9);
+    }
+
+    @Test
+    void temperatureAndTopPDroppedWhenUnsupported() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, 0.7, 0.9);
+
+        assertThat(result.getDroppedFeatures()).containsExactlyInAnyOrder("temperature", "topP");
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void temperatureAndTopPLeftUnsetWhenNotRequested() {
+        Request request = Request.builder().prompt("p").build();
+        ModelEntry model = fixture(false, false, false, false, false, false);
+
+        NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO, null, null);
+
+        assertThat(result.getDroppedFeatures()).isEmpty();
+        assertThat(result.getAdaptedRequest().getTemperature()).isNull();
+        assertThat(result.getAdaptedRequest().getTopP()).isNull();
+    }
+
+    @Test
+    void negotiationIsIndependentPerAttemptAndDoesNotMutateOriginalRequest() {
+        Request original = Request.builder().prompt("p")
+                .tools(List.of(ToolDefinition.builder()
+                        .name("t").description("d").parameters(Map.of()).build()))
+                .build();
+
+        NegotiationResult first = CapabilityNegotiator.negotiate(fixture(false, false, false, false), original, StructuredOutputStrategy.AUTO);
+        NegotiationResult second = CapabilityNegotiator.negotiate(fixture(false, true, false, false), original, StructuredOutputStrategy.AUTO);
+
+        assertThat(first.getDroppedFeatures()).containsExactly("tools");
+        assertThat(second.getDroppedFeatures()).isEmpty();
+        assertThat(original.getTools()).hasSize(1); // original untouched
+    }
+
+    @Test
+    void unmetRequiredFeaturesListsOnlyRequiredFeaturesTheModelWouldDrop() {
+        Request request = Request.builder()
+                .prompt("p")
+                .responseSchema(SCHEMA)
+                .tools(List.of(ToolDefinition.builder().name("t").parameters(Map.of("type", "object")).build()))
+                .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[] {1}).build()))
+                .build();
+        ModelEntry model = fixture(false, false, false, false);
+        Set<Feature> all = Set.of(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS);
+
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.NATIVE, all))
+                .containsExactly(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS);
+        // prompt-fallback honors the schema, so it isn't unmet under AUTO
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.AUTO, all))
+                .containsExactly(Feature.TOOLS, Feature.ATTACHMENTS);
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.NATIVE, Set.of(Feature.TOOLS)))
+                .containsExactly(Feature.TOOLS);
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(model, request, StructuredOutputStrategy.NATIVE, Set.of()))
+                .isEmpty();
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(fixture(true, true, true, true), request, StructuredOutputStrategy.NATIVE, all))
+                .isEmpty();
+    }
+
+    @Test
+    void requiredFeatureUnusedByRequestIsNeverUnmet() {
+        Request request = Request.builder().prompt("p").build();
+
+        assertThat(CapabilityNegotiator.unmetRequiredFeatures(fixture(false, false, false, false), request,
+                StructuredOutputStrategy.NATIVE, Set.of(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS)))
+                .isEmpty();
+    }
+
+    private static ModelEntry fixture(boolean structuredOutput, boolean tools, boolean vision, boolean fileInput) {
+        return fixture(structuredOutput, tools, vision, fileInput, true, true);
+    }
+
+    private static ModelEntry fixture(
+            boolean structuredOutput, boolean tools, boolean vision, boolean fileInput,
+            boolean temperature, boolean topP) {
+        return ModelEntry.builder()
+                .provider(Provider.ANTHROPIC)
+                .model("test-model")
+                .inputCostPerMillionTokens(1.0)
+                .outputCostPerMillionTokens(1.0)
+                .thinkingScore(5.0)
+                .speedScore(5.0)
+                .contextWindowTokens(128_000)
+                .maxOutputTokens(4_096)
+                .supportsStructuredOutput(structuredOutput)
+                .supportsTools(tools)
+                .supportsVision(vision)
+                .supportsFileInput(fileInput)
+                .supportsFileOutput(false)
+                .supportsTemperature(temperature)
+                .supportsTopP(topP)
+                .lastUpdated(Instant.parse("2026-01-01T00:00:00Z"))
+                .build();
+    }
+}

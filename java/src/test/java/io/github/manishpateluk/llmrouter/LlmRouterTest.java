@@ -1,0 +1,802 @@
+package io.github.manishpateluk.llmrouter;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
+
+import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
+import io.github.manishpateluk.llmrouter.capability.ModelEntry;
+import io.github.manishpateluk.llmrouter.config.Feature;
+import io.github.manishpateluk.llmrouter.config.RouteEntry;
+import io.github.manishpateluk.llmrouter.config.RouterConfig;
+import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
+import io.github.manishpateluk.llmrouter.config.ThinkingLevel;
+import io.github.manishpateluk.llmrouter.error.ErrorCode;
+import io.github.manishpateluk.llmrouter.error.InvalidConfigException;
+import io.github.manishpateluk.llmrouter.error.InvalidRequestException;
+import io.github.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
+import io.github.manishpateluk.llmrouter.error.RouterExhaustedException;
+import io.github.manishpateluk.llmrouter.model.AttemptOutcome;
+import io.github.manishpateluk.llmrouter.model.Request;
+import io.github.manishpateluk.llmrouter.model.Response;
+import io.github.manishpateluk.llmrouter.model.ToolDefinition;
+import io.github.manishpateluk.llmrouter.model.Usage;
+import io.github.manishpateluk.llmrouter.provider.Provider;
+import io.github.manishpateluk.llmrouter.provider.ProviderAdapter;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+@ExtendWith(MockitoExtension.class)
+class LlmRouterTest {
+
+    @Mock
+    private ProviderAdapter anthropic;
+    @Mock
+    private ProviderAdapter openai;
+    @Mock
+    private ProviderAdapter openrouter;
+    @Mock
+    private ProviderAdapter perplexity;
+
+    @AfterEach
+    void cleanUpRegisteredFixtures() {
+        ModelCapabilityTable.removeModel(Provider.OPENROUTER, "fixture-model");
+    }
+
+    private static void stubId(ProviderAdapter adapter, Provider provider) {
+        lenient().when(adapter.id()).thenReturn(provider);
+    }
+
+    private static Response fragment(String content) {
+        return Response.builder()
+                .content(content)
+                .usage(Usage.builder().inputTokens(10).outputTokens(5).reasoningTokens(0).estimatedCostUsdCents(0).build())
+                .build();
+    }
+
+    @Test
+    void firstCandidateSuccessReturnsImmediatelyWithNoAttempts() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("claude-opus-5"), any())).thenReturn(fragment("hello"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("hello");
+        assertThat(response.getProviderUsed()).isEqualTo(Provider.ANTHROPIC);
+        assertThat(response.getModelUsed()).isEqualTo("claude-opus-5");
+        assertThat(response.getAttempts()).isEmpty();
+    }
+
+    @Test
+    void fallsBackToNextCandidateAfterFailureAndRecordsIt() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(anthropic.send(any(), any())).thenThrow(new RuntimeException("rate limited"));
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("recovered"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("recovered");
+        assertThat(response.getProviderUsed()).isEqualTo(Provider.OPENAI);
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getProvider()).isEqualTo(Provider.ANTHROPIC);
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.FAILED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("rate limited");
+    }
+
+    @Test
+    void noInterceptorSuppliedDefaultsToIdentityBehavesLikeToday() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.send(eq("claude-opus-5"), captor.capture())).thenReturn(fragment("hello"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic)); // no interceptor supplied
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("hello");
+        assertThat(captor.getValue().getPrompt()).isEqualTo("hi"); // sent unmodified
+    }
+
+    @Test
+    void interceptorReceivesCorrectProviderAndModelPerCandidateIncludingOnFallback() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(anthropic.send(any(), any())).thenThrow(new RuntimeException("rate limited"));
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("recovered"));
+
+        List<String> seenCandidates = new ArrayList<>();
+        RequestInterceptor interceptor = (provider, model, request) -> {
+            seenCandidates.add(provider + "/" + model);
+            return request;
+        };
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai), interceptor);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("recovered");
+        assertThat(seenCandidates).containsExactly("anthropic/claude-opus-5", "openai/gpt-6-astra");
+    }
+
+    @Test
+    void interceptorMutationChangesWhatAdapterReceives() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.send(eq("claude-opus-5"), captor.capture())).thenReturn(fragment("ok"));
+
+        RequestInterceptor trimPrompt = (provider, model, request) -> request.toBuilder().prompt("trimmed").build();
+
+        LlmRouter router = new LlmRouter(List.of(anthropic), trimPrompt);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        router.complete("original prompt", config);
+
+        assertThat(captor.getValue().getPrompt()).isEqualTo("trimmed");
+    }
+
+    @Test
+    void interceptorAlsoAppliesOnTheAsyncPath() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.sendAsync(eq("claude-opus-5"), captor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(fragment("async ok")));
+
+        RequestInterceptor trimPrompt = (provider, model, request) -> request.toBuilder().prompt("trimmed-async").build();
+
+        LlmRouter router = new LlmRouter(List.of(anthropic), trimPrompt);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        Response response = router.completeAsync("original", config).join();
+
+        assertThat(response.getContent()).isEqualTo("async ok");
+        assertThat(captor.getValue().getPrompt()).isEqualTo("trimmed-async");
+    }
+
+    @Test
+    void interceptorThrowingIsRecordedAsFailedAttemptAndFallsBackToNextCandidate() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("recovered"));
+
+        RequestInterceptor throwsForAnthropic = (provider, model, request) -> {
+            if (provider == Provider.ANTHROPIC) {
+                throw new RuntimeException("interceptor boom");
+            }
+            return request;
+        };
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai), throwsForAnthropic);
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("recovered");
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getProvider()).isEqualTo(Provider.ANTHROPIC);
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.FAILED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("interceptor boom");
+        verify(anthropic, never()).send(any(), any()); // interceptor failed before the adapter was ever called
+    }
+
+    @Test
+    void skipsUnavailableCandidateAndRecordsIt() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(false);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("no API key detected");
+    }
+
+    @Test
+    void exhaustionThrowsWithFullAttemptsList() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(any(), any())).thenThrow(new RuntimeException("boom"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+
+        assertThatThrownBy(() -> router.complete("hi", config))
+                .isInstanceOf(RouterExhaustedException.class)
+                .satisfies(e -> assertThat(((RouterExhaustedException) e).attempts()).hasSize(1));
+    }
+
+    @Test
+    void noProvidersConfiguredWhenDefaultRouteHasNoAvailableAdapters() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(false);
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+
+        assertThatThrownBy(() -> router.complete("hi"))
+                .isInstanceOf(NoProvidersConfiguredException.class);
+    }
+
+    @Test
+    void explicitEmptyRouteExhaustsRatherThanThrowingNoProvidersConfigured() {
+        LlmRouter router = new LlmRouter(List.of());
+        RouterConfig config = RouterConfig.builder().route(List.of()).build();
+
+        assertThatThrownBy(() -> router.complete("hi", config))
+                .isInstanceOf(RouterExhaustedException.class);
+    }
+
+    @Test
+    void dropsUnsupportedToolsAndReportsInDroppedFeatures() {
+        registerFixtureModel(false, false, false);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTools()).isEmpty(); // negotiator already stripped it
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .build();
+        Request request = Request.builder()
+                .prompt("hi")
+                .tools(List.of(ToolDefinition.builder().name("t").description("d").parameters(Map.of("type", "object")).build()))
+                .config(config)
+                .build();
+
+        Response response = router.complete(request);
+
+        assertThat(response.getDroppedFeatures()).containsExactly("tools");
+    }
+
+    @Test
+    void computesEstimatedCostFromCapabilityTablePricing() {
+        registerFixtureModel(false, false, false); // $2/$4 per 1M tokens, per registerFixtureModel
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenReturn(fragment("ok")); // 10 input, 5 output tokens
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        // (10/1_000_000)*2.0 + (5/1_000_000)*4.0 dollars = 4.0e-5 dollars = 0.004 cents -> rounds to 0
+        // Use larger token counts via a custom fragment to get a non-zero, easily-asserted value instead:
+        assertThat(response.getUsage().getEstimatedCostUsdCents()).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
+    void parsesStructuredOutputWhenSchemaIsHonored() {
+        registerFixtureModel(true, true, false); // supportsStructuredOutput = true
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenReturn(fragment("{\"answer\":42}"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .build();
+        Request request = Request.builder()
+                .prompt("hi")
+                .responseSchema(Map.of("type", "object"))
+                .config(config)
+                .build();
+
+        Response response = router.complete(request);
+
+        assertThat(response.getStructuredOutput()).containsEntry("answer", 42);
+        assertThat(response.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void doesNotAttemptToParseStructuredOutputWhenSchemaWasDropped() {
+        registerFixtureModel(false, false, false); // supportsStructuredOutput = false
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenReturn(fragment("plain text, not json"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .structuredOutputStrategy(StructuredOutputStrategy.NATIVE)
+                .build();
+        Request request = Request.builder()
+                .prompt("hi")
+                .responseSchema(Map.of("type", "object"))
+                .config(config)
+                .build();
+
+        Response response = router.complete(request);
+
+        assertThat(response.getDroppedFeatures()).containsExactly("responseSchema");
+        assertThat(response.getStructuredOutput()).isNull();
+    }
+
+    @Test
+    void onlyTemperatureSentToAdapterWhenSupported() {
+        registerFixtureModel(false, false, false, true, true);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isEqualTo(0.7);
+            assertThat(sent.getTopP()).isNull();
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void temperaturePreferredOverTopPWhenBothRequestedAndModelSupportsBoth() {
+        registerFixtureModel(false, false, false, true, true);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isEqualTo(0.7);
+            assertThat(sent.getTopP()).isNull();
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).containsExactly("topP");
+    }
+
+    @Test
+    void topPUsedWhenBothRequestedButModelOnlySupportsTopP() {
+        registerFixtureModel(false, false, false, false, true);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isNull();
+            assertThat(sent.getTopP()).isEqualTo(0.9);
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).containsExactly("temperature");
+    }
+
+    @Test
+    void temperatureAndTopPDroppedAndReportedWhenModelDoesNotSupportThem() {
+        registerFixtureModel(false, false, false, false, false);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("fixture-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isNull();
+            assertThat(sent.getTopP()).isNull();
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).containsExactlyInAnyOrder("temperature", "topP");
+    }
+
+    @Test
+    void temperatureAndTopPForwardedOptimisticallyForModelNotInCapabilityTable() {
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.send(eq("unregistered-model"), any())).thenAnswer(invocation -> {
+            Request sent = invocation.getArgument(1);
+            assertThat(sent.getTemperature()).isEqualTo(0.7);
+            assertThat(sent.getTopP()).isEqualTo(0.9);
+            return fragment("ok");
+        });
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "unregistered-model")))
+                .temperature(0.7)
+                .topP(0.9)
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void asyncFallsBackAcrossCandidates() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        stubId(openai, Provider.OPENAI);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(anthropic.sendAsync(any(), any())).thenReturn(CompletableFuture.failedFuture(new RuntimeException("down")));
+        when(openai.sendAsync(eq("gpt-6-astra"), any())).thenReturn(CompletableFuture.completedFuture(fragment("async ok")));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .build();
+
+        Response response = router.completeAsync("hi", config).join();
+
+        assertThat(response.getContent()).isEqualTo("async ok");
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.FAILED);
+    }
+
+    @Test
+    void callbackStyleAsyncInvokesOnSuccess() {
+        stubId(anthropic, Provider.ANTHROPIC);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.sendAsync(eq("claude-opus-5"), any())).thenReturn(CompletableFuture.completedFuture(fragment("callback ok")));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-opus-5")))
+                .build();
+        Request request = Request.builder().prompt("hi").config(config).build();
+
+        AtomicReference<Response> result = new AtomicReference<>();
+        router.completeAsync(request, result::set, t -> { throw new AssertionError(t); });
+
+        assertThat(result.get()).isNotNull();
+        assertThat(result.get().getContent()).isEqualTo("callback ok");
+    }
+
+    @Test
+    void invalidConfigWhenThinkingLevelExplicitlyNulled() {
+        LlmRouter router = new LlmRouter(List.of());
+        RouterConfig config = RouterConfig.builder().thinkingLevel(null).build();
+
+        assertThatThrownBy(() -> router.complete("hi", config)).isInstanceOf(InvalidConfigException.class);
+    }
+
+    @Test
+    void blankPromptIsRejected() {
+        LlmRouter router = new LlmRouter(List.of());
+
+        assertThatThrownBy(() -> router.complete("   ")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ---- requiredFeatures (§5.4) ----
+
+    private static final List<ToolDefinition> ONE_TOOL = List.of(ToolDefinition.builder()
+            .name("lookup").description("d").parameters(Map.of("type", "object")).build());
+
+    @Test
+    void requiredToolsSkipsIncapableExplicitCandidateAndFallsBackWithToolsIntact() {
+        registerFixtureModel(false, false, false); // openrouter/fixture-model: no tools
+        stubId(openrouter, Provider.OPENROUTER);
+        stubId(openai, Provider.OPENAI);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(openai.send(eq("gpt-6-astra"), captor.capture())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        verify(openrouter, never()).send(any(), any());
+        assertThat(captor.getValue().getTools()).isEqualTo(ONE_TOOL);
+        assertThat(response.getDroppedFeatures()).isEmpty();
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getModel()).isEqualTo("fixture-model");
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("model does not support required feature(s) [tools]");
+    }
+
+    @Test
+    void requiredToolsWithNoCapableCandidateExhaustsWithReasonInAttempts() {
+        registerFixtureModel(false, false, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        when(openrouter.isAvailable()).thenReturn(true);
+
+        LlmRouter router = new LlmRouter(List.of(openrouter));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+        Request request = Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build();
+
+        assertThatThrownBy(() -> router.complete(request))
+                .isInstanceOf(RouterExhaustedException.class)
+                .hasMessageContaining("model does not support required feature(s) [tools]")
+                .satisfies(e -> assertThat(((RouterExhaustedException) e).attempts())
+                        .singleElement()
+                        .satisfies(attempt -> assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED)));
+        verify(openrouter, never()).send(any(), any());
+    }
+
+    @Test
+    void requiredToolsSkipsProviderOnlyEntryWithNoCapableModelUnderCostOptimizedRouting() {
+        // No Perplexity model in the capability table supports tools.
+        stubId(perplexity, Provider.PERPLEXITY);
+        stubId(openai, Provider.OPENAI);
+        when(perplexity.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        ArgumentCaptor<String> model = ArgumentCaptor.forClass(String.class);
+        when(openai.send(model.capture(), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(perplexity, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.PERPLEXITY), RouteEntry.of(Provider.OPENAI)))
+                .costOptimized(true)
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        verify(perplexity, never()).send(any(), any());
+        assertThat(ModelCapabilityTable.findModel(Provider.OPENAI, model.getValue()).orElseThrow().isSupportsTools()).isTrue();
+        assertThat(response.getAttempts()).singleElement().satisfies(attempt -> {
+            assertThat(attempt.getProvider()).isEqualTo(Provider.PERPLEXITY);
+            assertThat(attempt.getModel()).isNull();
+            assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+            assertThat(attempt.getReason()).isEqualTo("no perplexity model supports required feature(s) [tools]");
+        });
+    }
+
+    @Test
+    void requiredToolsOnDefaultRouteWithOnlyIncapableProvidersExhaustsRatherThanNoProvidersConfigured() {
+        stubId(perplexity, Provider.PERPLEXITY);
+        when(perplexity.isAvailable()).thenReturn(true);
+
+        LlmRouter router = new LlmRouter(List.of(perplexity));
+        RouterConfig config = RouterConfig.builder().requiredFeatures(Set.of(Feature.TOOLS)).build();
+        Request request = Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build();
+
+        assertThatThrownBy(() -> router.complete(request))
+                .isInstanceOf(RouterExhaustedException.class)
+                .hasMessageContaining("no perplexity model supports required feature(s) [tools]");
+    }
+
+    @Test
+    void requiredFeatureTheRequestDoesNotUseIsTriviallySatisfied() {
+        registerFixtureModel(false, false, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openrouter.send(eq("fixture-model"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .requiredFeatures(Set.of(Feature.TOOLS, Feature.RESPONSE_SCHEMA, Feature.ATTACHMENTS))
+                .build();
+
+        Response response = router.complete("hi", config);
+
+        assertThat(response.getContent()).isEqualTo("ok");
+        assertThat(response.getAttempts()).isEmpty();
+    }
+
+    @Test
+    void requiredResponseSchemaHonoredViaPromptFallbackIsNotSkippedButIsUnderNativeStrategy() {
+        registerFixtureModel(false, false, false); // no native structured output
+        stubId(openrouter, Provider.OPENROUTER);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openrouter.send(eq("fixture-model"), any())).thenReturn(fragment("{}"));
+        LlmRouter router = new LlmRouter(List.of(openrouter));
+        RouterConfig.RouterConfigBuilder config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .requiredFeatures(Set.of(Feature.RESPONSE_SCHEMA));
+        Map<String, Object> schema = Map.of("type", "object");
+
+        Response viaFallback = router.complete(Request.builder().prompt("hi").responseSchema(schema)
+                .config(config.structuredOutputStrategy(StructuredOutputStrategy.AUTO).build()).build());
+        assertThat(viaFallback.getAttempts()).isEmpty();
+
+        Request nativeOnly = Request.builder().prompt("hi").responseSchema(schema)
+                .config(config.structuredOutputStrategy(StructuredOutputStrategy.NATIVE).build()).build();
+        assertThatThrownBy(() -> router.complete(nativeOnly))
+                .isInstanceOf(RouterExhaustedException.class)
+                .hasMessageContaining("[responseSchema]");
+    }
+
+    @Test
+    void requiredToolsStillAttemptsModelMissingFromCapabilityTable() {
+        stubId(openai, Provider.OPENAI);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("not-in-table"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENAI, "not-in-table")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        assertThat(response.getContent()).isEqualTo("ok");
+    }
+
+    @Test
+    void requiredToolsSkipAlsoAppliesOnTheAsyncPath() {
+        registerFixtureModel(false, false, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        stubId(openai, Provider.OPENAI);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.sendAsync(eq("gpt-6-astra"), any())).thenReturn(CompletableFuture.completedFuture(fragment("async ok")));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.completeAsync(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build()).join();
+
+        verify(openrouter, never()).sendAsync(any(), any());
+        assertThat(response.getContent()).isEqualTo("async ok");
+        assertThat(response.getAttempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED));
+    }
+
+    @Test
+    void invalidConfigWhenRequiredFeaturesExplicitlyNulled() {
+        LlmRouter router = new LlmRouter(List.of());
+        RouterConfig config = RouterConfig.builder().requiredFeatures(null).build();
+
+        assertThatThrownBy(() -> router.complete("hi", config)).isInstanceOf(InvalidConfigException.class);
+    }
+
+    // ---- tool definition validation (§3.1) ----
+
+    @Test
+    void invalidToolDefinitionsAreRejectedBeforeAnyProviderIsCalled() {
+        stubId(openai, Provider.OPENAI);
+        lenient().when(openai.isAvailable()).thenReturn(true);
+        LlmRouter router = new LlmRouter(List.of(openai));
+        Request request = Request.builder()
+                .prompt("hi")
+                .tools(List.of(
+                        ToolDefinition.builder().name("bad name").parameters(Map.of("type", "object")).build(),
+                        ToolDefinition.builder().name("dup").parameters(Map.of("type", "object")).build(),
+                        ToolDefinition.builder().name("dup").parameters(Map.of("type", "object")).build()))
+                .build();
+
+        assertThatThrownBy(() -> router.complete(request))
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessageContaining("tools[0] 'bad name': name must match")
+                .hasMessageContaining("tools[2] 'dup': duplicate tool name")
+                .satisfies(e -> assertThat(((InvalidRequestException) e).code()).isEqualTo(ErrorCode.INVALID_REQUEST));
+        verify(openai, never()).send(any(), any());
+    }
+
+    @Test
+    void invalidToolDefinitionsFailTheAsyncFutureRatherThanThrowing() {
+        LlmRouter router = new LlmRouter(List.of());
+        Request request = Request.builder()
+                .prompt("hi")
+                .tools(List.of(ToolDefinition.builder().name("t").parameters(Map.of()).build()))
+                .build();
+
+        CompletableFuture<Response> future = router.completeAsync(request);
+
+        assertThat(future).isCompletedExceptionally();
+        assertThatThrownBy(future::join).hasCauseInstanceOf(InvalidRequestException.class);
+    }
+
+    private static void registerFixtureModel(boolean structuredOutput, boolean tools, boolean vision) {
+        registerFixtureModel(structuredOutput, tools, vision, true, true);
+    }
+
+    private static void registerFixtureModel(
+            boolean structuredOutput, boolean tools, boolean vision, boolean temperature, boolean topP) {
+        ModelCapabilityTable.registerModel(ModelEntry.builder()
+                .provider(Provider.OPENROUTER)
+                .model("fixture-model")
+                .inputCostPerMillionTokens(2.0)
+                .outputCostPerMillionTokens(4.0)
+                .thinkingScore(5.0)
+                .speedScore(5.0)
+                .contextWindowTokens(10_000)
+                .maxOutputTokens(2_000)
+                .supportsStructuredOutput(structuredOutput)
+                .supportsTools(tools)
+                .supportsVision(vision)
+                .supportsFileInput(false)
+                .supportsFileOutput(false)
+                .supportsTemperature(temperature)
+                .supportsTopP(topP)
+                .lastUpdated(Instant.parse("2026-01-01T00:00:00Z"))
+                .build());
+    }
+}

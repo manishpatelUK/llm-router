@@ -10,7 +10,7 @@ Include this in your `pom.xml`:
 <dependency>
   <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.5</version>
 </dependency>
 ```
 
@@ -21,8 +21,8 @@ Requires **Java 25+**.
 Set an API key for at least one provider first — see [Configuring credentials](../README.md#configuring-credentials) in the main README for the environment variables the router reads.
 
 ```java
-import com.manishpateluk.llmrouter.LlmRouter;
-import com.manishpateluk.llmrouter.model.Response;
+import io.github.manishpateluk.llmrouter.LlmRouter;
+import io.github.manishpateluk.llmrouter.model.Response;
 
 LlmRouter router = new LlmRouter(); // construct once, reuse everywhere — it's thread-safe
 
@@ -44,7 +44,7 @@ Response response = router.complete(
 **With conversation history:**
 
 ```java
-import com.manishpateluk.llmrouter.model.Message;
+import io.github.manishpateluk.llmrouter.model.Message;
 import java.util.List;
 
 List<Message> history = List.of(
@@ -57,10 +57,10 @@ Response response = router.complete("And 2+3?", history);
 **With a `RouterConfig`** (explicit fallback order, thinking level, cost-optimized routing):
 
 ```java
-import com.manishpateluk.llmrouter.config.RouteEntry;
-import com.manishpateluk.llmrouter.config.RouterConfig;
-import com.manishpateluk.llmrouter.config.ThinkingLevel;
-import com.manishpateluk.llmrouter.provider.Provider;
+import io.github.manishpateluk.llmrouter.config.RouteEntry;
+import io.github.manishpateluk.llmrouter.config.RouterConfig;
+import io.github.manishpateluk.llmrouter.config.ThinkingLevel;
+import io.github.manishpateluk.llmrouter.provider.Provider;
 
 RouterConfig config = RouterConfig.builder()
     .route(List.of(RouteEntry.of(Provider.ANTHROPIC), RouteEntry.of(Provider.OPENAI)))
@@ -92,8 +92,8 @@ router.completeAsync(
 **Tools, structured output, and file attachments** — combine them via `Request.builder()` (this is also how you reach every option shown above, all at once, if you need to):
 
 ```java
-import com.manishpateluk.llmrouter.model.Request;
-import com.manishpateluk.llmrouter.model.ToolDefinition;
+import io.github.manishpateluk.llmrouter.model.Request;
+import io.github.manishpateluk.llmrouter.model.ToolDefinition;
 import java.util.Map;
 
 Request request = Request.builder()
@@ -119,7 +119,7 @@ Tool definitions are validated before any provider is called. Each `name` must m
 **Requiring features instead of letting them drop.** By default, if the model routed to can't support tools, a schema, or an attachment, the router drops that feature, records it in `getDroppedFeatures()`, and sends the call anyway. When your code depends on a feature — an agent loop whose control flow lives in its tools, say — mark it required so incapable candidates are skipped instead:
 
 ```java
-import com.manishpateluk.llmrouter.config.Feature;
+import io.github.manishpateluk.llmrouter.config.Feature;
 import java.util.Set;
 
 RouterConfig agentConfig = RouterConfig.builder()
@@ -149,7 +149,7 @@ See §8.1.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full design ratio
 **Intercepting requests right before they're sent** — an optional last-chance hook to inspect or modify the fully negotiated request for each attempt, e.g. to compress conversation history against that exact model's context window:
 
 ```java
-import com.manishpateluk.llmrouter.RequestInterceptor;
+import io.github.manishpateluk.llmrouter.RequestInterceptor;
 
 RequestInterceptor interceptor = (provider, model, request) ->
     request.toBuilder().history(trimHistoryFor(model, request.getHistory())).build();
@@ -163,7 +163,7 @@ It runs after capability negotiation, so `request` is the exact form about to be
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
 
 ```java
-import com.manishpateluk.llmrouter.error.RouterExhaustedException;
+import io.github.manishpateluk.llmrouter.error.RouterExhaustedException;
 
 try {
     Response response = router.complete("Hello");
@@ -179,7 +179,7 @@ This README only covers installing and calling the library; credential setup liv
 
 ## Developer Notes on push (because I'm too stupid to remember these steps)
 
-1. Bump the version in java/pom.xml off 1.0.0-SNAPSHOT to a real release, e.g. 1.0.0
+1. Bump the version in java/pom.xml off 1.0.5-SNAPSHOT to a real release, e.g. 1.0.5
 2. From java/: mvn clean deploy -Prelease
 3. It'll prompt for your GPG passphrase, sign everything, and upload the bundle to Central
 4. Go to the Central Portal → Deployments, find it, review the contents, and click Publish — it stays private until you do this
