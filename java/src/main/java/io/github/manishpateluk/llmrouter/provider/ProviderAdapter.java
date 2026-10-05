@@ -3,6 +3,7 @@ package io.github.manishpateluk.llmrouter.provider;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
@@ -58,5 +59,20 @@ public interface ProviderAdapter {
      */
     default CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         return CompletableFuture.supplyAsync(() -> send(model, adaptedRequest), DEFAULT_ASYNC_EXECUTOR);
+    }
+
+    /**
+     * Streaming counterpart of {@link #send}: calls {@code onText} with each piece of the
+     * response's text as the provider generates it, then returns the complete response fragment,
+     * exactly as {@link #send} would have. The default implementation doesn't stream — it calls
+     * {@link #send} and delivers the whole text in one piece — so every adapter supports
+     * {@code LlmRouter.completeStreaming}; override it for providers with a native streaming API.
+     */
+    default Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
+        Response response = send(model, adaptedRequest);
+        if (response.getContent() != null && !response.getContent().isEmpty()) {
+            onText.accept(response.getContent());
+        }
+        return response;
     }
 }

@@ -149,6 +149,45 @@ public final class LlmRouter {
 
     /** The canonical, most general sync call — every other {@code complete} overload delegates here. */
     public Response complete(Request request) {
+        return completeVia(request, ProviderAdapter::send);
+    }
+
+    /**
+     * {@link #complete(Request)}, streaming the response's text to {@code listener} as it's
+     * generated — for showing an answer to a user as it's written. Everything else is identical:
+     * routing, capability negotiation, the request interceptor, fallback, and the returned
+     * {@link Response} (whose content is the full text). Providers whose adapter has no native
+     * streaming deliver their text in one piece. If an attempt fails after streaming some text,
+     * {@link StreamListener#onReset()} is called before falling back to the next candidate.
+     */
+    public Response completeStreaming(Request request, StreamListener listener) {
+        Objects.requireNonNull(listener, "listener must not be null");
+        return completeVia(request, (adapter, model, toSend) -> {
+            boolean[] streamed = {false};
+            try {
+                return adapter.sendStreaming(model, toSend, delta -> {
+                    if (delta != null && !delta.isEmpty()) {
+                        streamed[0] = true;
+                        listener.onText(delta);
+                    }
+                });
+            } catch (RuntimeException e) {
+                if (streamed[0]) {
+                    listener.onReset();
+                }
+                throw e;
+            }
+        });
+    }
+
+    /** How one attempt is sent: plain or streaming. */
+    @FunctionalInterface
+    private interface Sender {
+        Response send(ProviderAdapter adapter, String model, Request toSend);
+    }
+
+    /** The shared sync fallback loop behind {@link #complete(Request)} and {@link #completeStreaming}. */
+    private Response completeVia(Request request, Sender sender) {
         validate(request);
         RouterConfig config = resolveConfig(request);
         List<RouteEntry> candidates = resolveCandidates(request, config);
@@ -167,7 +206,7 @@ public final class LlmRouter {
 
             try {
                 Request toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
-                Response fragment = adapter.send(candidate.getModel(), toSend);
+                Response fragment = sender.send(adapter, candidate.getModel(), toSend);
                 return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);
             } catch (RuntimeException e) {
                 attempts.add(recordFailure(candidate, e));

@@ -162,6 +162,25 @@ Contract:
 - The same hook instance is shared across every call the router instance serves, and applies uniformly regardless of which call style (sync/async/callback) was used to invoke the router.
 - If the hook itself throws, implementations should treat it the same as any other in-attempt failure (§10: not fatal, recorded as a failed attempt, router advances to the next candidate) rather than letting it escape uncaught — a broken interceptor shouldn't take down the whole call when a working fallback candidate exists.
 
+### 4.2 Streaming
+
+Implementations should offer a streaming variant of the canonical call — `completeStreaming(request, listener)` in Java — that delivers the response's text to a listener as the provider generates it, for showing an answer to a user as it's written.
+
+Shape (conceptual):
+
+```
+StreamListener {
+  onText(delta: string)      // the next piece of the response's text, in order; never empty
+  onReset()                  // optional: text delivered so far belongs to a failed attempt
+}
+```
+
+Contract:
+- Everything except delivery is identical to the non-streaming call: routing, capability negotiation (§4), the request interceptor (§4.1), required features (§5.4), fallback (§5.1), and the returned `Response`, whose `content` is the full text.
+- Fallback still applies mid-stream. If an attempt fails after some text has been delivered, `onReset` is called before the router advances to the next candidate, whose text then streams from the beginning. A failure before any text was delivered falls back without a reset.
+- Only text streams. Tool calls, structured output and usage arrive on the returned `Response` once the attempt completes.
+- Every provider supports the call: an adapter without native streaming delivers its whole text in one `onText` call (the `sendStreaming` default in §8.1).
+
 ---
 
 ## 5. `RouterConfig`
@@ -334,6 +353,7 @@ ProviderAdapter {
   id: string                                   // one of the canonical provider IDs, §12.1 (e.g. "anthropic")
   isAvailable(): boolean                       // credential check, §6
   send(model: string, adaptedRequest): RawResponse   // provider-specific call
+  sendStreaming(model, adaptedRequest, onText): RawResponse   // optional, §4.2; default: send, then onText(whole text)
   normalize(rawResponse): Response fragments   // maps provider response → unified Response shape
 }
 ```

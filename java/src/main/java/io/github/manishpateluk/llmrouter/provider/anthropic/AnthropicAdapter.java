@@ -11,8 +11,12 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.function.Consumer;
 
 import com.anthropic.client.AnthropicClient;
+import com.anthropic.core.http.StreamResponse;
+import com.anthropic.helpers.MessageAccumulator;
+import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.JsonValue;
 import com.anthropic.models.files.FileUploadParams;
@@ -116,6 +120,22 @@ public final class AnthropicAdapter implements ProviderAdapter {
     public CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         requireAvailable();
         return client.async().messages().create(toParams(model, adaptedRequest)).thenApply(this::fromMessage);
+    }
+
+    /** Streams via the Messages API's server-sent events, accumulating them into the same {@link Message} {@link #send} would return. */
+    @Override
+    public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
+        requireAvailable();
+        MessageAccumulator accumulator = MessageAccumulator.create();
+        try (StreamResponse<RawMessageStreamEvent> stream = client.messages().createStreaming(toParams(model, adaptedRequest))) {
+            stream.stream().forEach(event -> {
+                accumulator.accumulate(event);
+                event.contentBlockDelta()
+                        .flatMap(delta -> delta.delta().text())
+                        .ifPresent(text -> onText.accept(text.text()));
+            });
+        }
+        return fromMessage(accumulator.message());
     }
 
     private void requireAvailable() {

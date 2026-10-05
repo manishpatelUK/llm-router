@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 import tools.jackson.databind.ObjectMapper;
 import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
@@ -28,7 +29,11 @@ import com.openai.core.JsonValue;
 import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.ResponseFormatJsonSchema;
+import com.openai.core.http.StreamResponse;
+import com.openai.helpers.ChatCompletionAccumulator;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionChunk;
+import com.openai.models.chat.completions.ChatCompletionStreamOptions;
 import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionContentPart;
 import com.openai.models.chat.completions.ChatCompletionContentPartImage;
@@ -111,6 +116,30 @@ public final class OpenAiAdapter implements ProviderAdapter {
     public CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         requireAvailable();
         return client.async().chat().completions().create(toParams(model, adaptedRequest)).thenApply(this::fromCompletion);
+    }
+
+    /**
+     * Streams chat completion chunks, accumulating them into the same {@link ChatCompletion}
+     * {@link #send} would return; asks for usage in the final chunk so token counts (and so cost)
+     * are still reported.
+     */
+    @Override
+    public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
+        requireAvailable();
+        ChatCompletionCreateParams params = toParams(model, adaptedRequest).toBuilder()
+                .streamOptions(ChatCompletionStreamOptions.builder().includeUsage(true).build())
+                .build();
+        ChatCompletionAccumulator accumulator = ChatCompletionAccumulator.create();
+        try (StreamResponse<ChatCompletionChunk> stream = client.chat().completions().createStreaming(params)) {
+            stream.stream().forEach(chunk -> {
+                accumulator.accumulate(chunk);
+                chunk.choices().stream().findFirst()
+                        .flatMap(choice -> choice.delta().content())
+                        .filter(text -> !text.isEmpty())
+                        .ifPresent(onText);
+            });
+        }
+        return fromCompletion(accumulator.chatCompletion());
     }
 
     private void requireAvailable() {

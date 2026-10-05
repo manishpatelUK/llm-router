@@ -160,6 +160,27 @@ LlmRouter router = new LlmRouter(interceptor);
 
 It runs after capability negotiation, so `request` is the exact form about to be sent for that attempt — and it runs once per candidate, so on fallback you see each candidate's own `provider`/`model` in turn. Returning `request` unchanged is a no-op, and supplying no interceptor at all (the default) behaves identically to today. If the hook itself throws, that attempt is recorded as failed and the router falls back to the next candidate rather than failing the whole call. See §4.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full contract.
 
+**Streaming** the response's text as it's generated, e.g. to show an answer while it's written:
+
+```java
+import io.github.manishpateluk.llmrouter.StreamListener;
+
+Response response = router.completeStreaming(request, new StreamListener() {
+    @Override
+    public void onText(String delta) {
+        ui.append(delta);
+    }
+
+    @Override
+    public void onReset() {   // an attempt failed mid-stream; the next candidate starts over
+        ui.clear();
+    }
+});
+// response.getContent() is the full text; tool calls, usage etc. are on the response as usual.
+```
+
+Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. Anthropic and OpenAI stream natively. Other providers deliver their text in one piece, so the call works everywhere. See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
 
 ```java
