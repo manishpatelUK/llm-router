@@ -178,6 +178,7 @@ StreamListener {
 Contract:
 - Everything except delivery is identical to the non-streaming call: routing, capability negotiation (§4), the request interceptor (§4.1), required features (§5.4), fallback (§5.1), and the returned `Response`, whose `content` is the full text.
 - Fallback still applies mid-stream. If an attempt fails after some text has been delivered, `onReset` is called before the router advances to the next candidate, whose text then streams from the beginning. A failure before any text was delivered falls back without a reset.
+- An error raised by the listener itself is the caller's, not the provider's: it ends the call immediately and reaches the caller unchanged, with no `onReset`, no recorded attempt and no fallback. Treating it as a failed attempt would spend a request on every remaining candidate and end in a misleading exhaustion error.
 - Only text streams. Tool calls, structured output and usage arrive on the returned `Response` once the attempt completes.
 - Every provider supports the call: an adapter without native streaming delivers its whole text in one `onText` call (the `sendStreaming` default in §8.1).
 

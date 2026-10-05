@@ -90,6 +90,66 @@ class LlmRouterStreamingTest {
     }
 
     @Test
+    void aListenerExceptionEndsTheCallUnchangedWithoutResetOrFallback() {
+        IllegalStateException listenerBug = new IllegalStateException("ui closed");
+        List<String> events = new ArrayList<>();
+        StreamListener listener = new StreamListener() {
+            @Override
+            public void onText(String delta) {
+                events.add(delta);
+                throw listenerBug;
+            }
+
+            @Override
+            public void onReset() {
+                events.add("<reset>");
+            }
+        };
+        LlmRouter router = new LlmRouter(List.of(
+                streamingAdapter(Provider.ANTHROPIC, List.of("Hel", "lo"), null),
+                mustNotBeCalled(Provider.OPENAI)));
+
+        assertThatThrownBy(() -> router.completeStreaming(request(), listener)).isSameAs(listenerBug);
+        assertThat(events).containsExactly("Hel");
+    }
+
+    @Test
+    void aListenerExceptionIsRecognisedEvenWhenTheAdapterWrapsIt() {
+        IllegalStateException listenerBug = new IllegalStateException("ui closed");
+        ProviderAdapter wrapping = new ProviderAdapter() {
+            @Override
+            public Provider id() {
+                return Provider.ANTHROPIC;
+            }
+
+            @Override
+            public boolean isAvailable() {
+                return true;
+            }
+
+            @Override
+            public Response send(String model, Request adaptedRequest) {
+                throw new AssertionError("streaming calls must use sendStreaming");
+            }
+
+            @Override
+            public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
+                try {
+                    onText.accept("Hel");
+                    return fragment("Hel");
+                } catch (RuntimeException e) {
+                    throw new RuntimeException("sdk stream failed", e); // as an SDK might wrap a callback failure
+                }
+            }
+        };
+        LlmRouter router = new LlmRouter(List.of(wrapping, mustNotBeCalled(Provider.OPENAI)));
+
+        assertThatThrownBy(() -> router.completeStreaming(request(), delta -> {
+            throw listenerBug;
+        })).isSameAs(listenerBug);
+    }
+
+    @Test
     void exhaustionStillThrows() {
         LlmRouter router = new LlmRouter(List.of(adapter(Provider.ANTHROPIC, null, new RuntimeException("down"))));
 
@@ -155,7 +215,16 @@ class LlmRouterStreamingTest {
     }
 
     /** An adapter that streams {@code deltas}, then either completes or throws {@code failure}. */
+    /** A fallback candidate that fails the test if the router ever reaches it. */
+    private static ProviderAdapter mustNotBeCalled(Provider id) {
+        return streamingAdapter(id, List.of(), null, true);
+    }
+
     private static ProviderAdapter streamingAdapter(Provider id, List<String> deltas, RuntimeException failure) {
+        return streamingAdapter(id, deltas, failure, false);
+    }
+
+    private static ProviderAdapter streamingAdapter(Provider id, List<String> deltas, RuntimeException failure, boolean forbidden) {
         return new ProviderAdapter() {
             @Override
             public Provider id() {
@@ -174,6 +243,9 @@ class LlmRouterStreamingTest {
 
             @Override
             public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
+                if (forbidden) {
+                    throw new AssertionError("the router must not fall back to " + id);
+                }
                 deltas.forEach(onText);
                 if (failure != null) {
                     throw failure;

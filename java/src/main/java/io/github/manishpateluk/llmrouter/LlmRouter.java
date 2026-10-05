@@ -159,25 +159,65 @@ public final class LlmRouter {
      * {@link Response} (whose content is the full text). Providers whose adapter has no native
      * streaming deliver their text in one piece. If an attempt fails after streaming some text,
      * {@link StreamListener#onReset()} is called before falling back to the next candidate.
+     *
+     * <p>An exception thrown by {@code listener} itself is not a provider failure: it ends the call
+     * immediately and is rethrown unchanged, with no reset and no fallback, so a broken listener
+     * never costs a request per remaining candidate.
      */
     public Response completeStreaming(Request request, StreamListener listener) {
         Objects.requireNonNull(listener, "listener must not be null");
-        return completeVia(request, (adapter, model, toSend) -> {
-            boolean[] streamed = {false};
-            try {
-                return adapter.sendStreaming(model, toSend, delta -> {
-                    if (delta != null && !delta.isEmpty()) {
-                        streamed[0] = true;
-                        listener.onText(delta);
+        try {
+            return completeVia(request, (adapter, model, toSend) -> {
+                boolean[] streamed = {false};
+                try {
+                    return adapter.sendStreaming(model, toSend, delta -> {
+                        if (delta != null && !delta.isEmpty()) {
+                            streamed[0] = true;
+                            try {
+                                listener.onText(delta);
+                            } catch (RuntimeException e) {
+                                throw new ListenerFailure(e);
+                            }
+                        }
+                    });
+                } catch (RuntimeException e) {
+                    ListenerFailure listenerFailure = ListenerFailure.findIn(e);
+                    if (listenerFailure != null) {
+                        throw listenerFailure; // unwrapped from anything the adapter or SDK added
                     }
-                });
-            } catch (RuntimeException e) {
-                if (streamed[0]) {
-                    listener.onReset();
+                    if (streamed[0]) {
+                        listener.onReset();
+                    }
+                    throw e;
                 }
-                throw e;
+            });
+        } catch (ListenerFailure e) {
+            throw e.listenerException();
+        }
+    }
+
+    /**
+     * Carries an exception thrown by a {@link StreamListener} out through the adapter and the
+     * fallback loop, which must not mistake it for a failed attempt.
+     */
+    private static final class ListenerFailure extends RuntimeException {
+
+        ListenerFailure(RuntimeException listenerException) {
+            super(listenerException);
+        }
+
+        RuntimeException listenerException() {
+            return (RuntimeException) getCause();
+        }
+
+        static ListenerFailure findIn(Throwable e) {
+            for (Throwable t = e; t != null; t = t.getCause()) {
+                if (t instanceof ListenerFailure failure) {
+                    return failure;
+                }
             }
-        });
+            return null;
+        }
     }
 
     /** How one attempt is sent: plain or streaming. */
@@ -208,6 +248,8 @@ public final class LlmRouter {
                 Request toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
                 Response fragment = sender.send(adapter, candidate.getModel(), toSend);
                 return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);
+            } catch (ListenerFailure e) {
+                throw e; // the caller's listener broke, not the provider — never fall back on it
             } catch (RuntimeException e) {
                 attempts.add(recordFailure(candidate, e));
             }
