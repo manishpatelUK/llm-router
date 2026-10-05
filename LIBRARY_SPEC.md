@@ -178,7 +178,8 @@ StreamListener {
 Contract:
 - Everything except delivery is identical to the non-streaming call: routing, capability negotiation (§4), the request interceptor (§4.1), required features (§5.4), fallback (§5.1), and the returned `Response`, whose `content` is the full text.
 - Fallback still applies mid-stream. If an attempt fails after some text has been delivered, `onReset` is called before the router advances to the next candidate, whose text then streams from the beginning. A failure before any text was delivered falls back without a reset.
-- An error raised by the listener itself is the caller's, not the provider's: it ends the call immediately and reaches the caller unchanged, with no `onReset`, no recorded attempt and no fallback. Treating it as a failed attempt would spend a request on every remaining candidate and end in a misleading exhaustion error.
+- An error raised by the listener itself (from `onText` or `onReset`) is the caller's, not the provider's: it ends the call immediately and reaches the caller unchanged, with no `onReset`, no recorded attempt and no fallback. Treating it as a failed attempt would spend a request on every remaining candidate and end in a misleading exhaustion error.
+- Implementations with an async call style (§11) should offer the streaming call in that style too (`completeStreamingAsync` in Java), with this same contract. Where the async variant runs on another thread, the listener is still called one piece at a time, in order. Whether text arrives in pieces or all at once depends only on the adapter, not on the call style: an adapter without an async streaming path runs its streaming path off the caller's thread (the `sendStreamingAsync` default in §8.1).
 - Only text streams. Tool calls, structured output and usage arrive on the returned `Response` once the attempt completes.
 - Every provider supports the call: an adapter without native streaming delivers its whole text in one `onText` call (the `sendStreaming` default in §8.1).
 
@@ -355,6 +356,7 @@ ProviderAdapter {
   isAvailable(): boolean                       // credential check, §6
   send(model: string, adaptedRequest): RawResponse   // provider-specific call
   sendStreaming(model, adaptedRequest, onText): RawResponse   // optional, §4.2; default: send, then onText(whole text)
+  sendStreamingAsync(model, adaptedRequest, onText): future<RawResponse>   // optional, §4.2; default: sendStreaming off the caller's thread
   normalize(rawResponse): Response fragments   // maps provider response → unified Response shape
 }
 ```

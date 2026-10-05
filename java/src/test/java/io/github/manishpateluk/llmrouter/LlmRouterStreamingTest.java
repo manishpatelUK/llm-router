@@ -12,6 +12,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,7 +26,7 @@ class LlmRouterStreamingTest {
             .build();
 
     /** Records what a stream delivered, including resets. */
-    private static final class Recorder implements StreamListener {
+    private static class Recorder implements StreamListener {
         final List<String> events = new ArrayList<>();
 
         @Override
@@ -147,6 +149,99 @@ class LlmRouterStreamingTest {
         assertThatThrownBy(() -> router.completeStreaming(request(), delta -> {
             throw listenerBug;
         })).isSameAs(listenerBug);
+    }
+
+    @Test
+    void aListenerExceptionFromOnResetAlsoEndsTheCallWithoutFallback() {
+        IllegalStateException resetBug = new IllegalStateException("can't clear");
+        StreamListener listener = new StreamListener() {
+            @Override
+            public void onText(String delta) {
+            }
+
+            @Override
+            public void onReset() {
+                throw resetBug;
+            }
+        };
+        LlmRouter router = new LlmRouter(List.of(
+                streamingAdapter(Provider.ANTHROPIC, List.of("Partial"), new RuntimeException("connection dropped")),
+                mustNotBeCalled(Provider.OPENAI)));
+
+        assertThatThrownBy(() -> router.completeStreaming(request(), listener)).isSameAs(resetBug);
+        assertThatThrownBy(() -> router.completeStreamingAsync(request(), listener).join()).hasCause(resetBug);
+    }
+
+    // ---- completeStreamingAsync ----
+
+    @Test
+    void asyncStreamingDeliversDeltasAndCompletesWithTheFullResponse() {
+        Recorder recorder = new Recorder();
+        LlmRouter router = new LlmRouter(List.of(streamingAdapter(Provider.ANTHROPIC, List.of("Hel", "lo ", "there"), null)));
+
+        Response response = router.completeStreamingAsync(request(), recorder).join();
+
+        assertThat(recorder.events).containsExactly("Hel", "lo ", "there");
+        assertThat(response.getContent()).isEqualTo("Hello there");
+        assertThat(response.getProviderUsed()).isEqualTo(Provider.ANTHROPIC);
+    }
+
+    @Test
+    void asyncStreamingWithAnAdapterWithoutNativeStreamingDeliversItsTextInOnePiece() {
+        Recorder recorder = new Recorder();
+        LlmRouter router = new LlmRouter(List.of(adapter(Provider.ANTHROPIC, "Hello there", null)));
+
+        Response response = router.completeStreamingAsync(request(), recorder).join();
+
+        assertThat(recorder.events).containsExactly("Hello there");
+        assertThat(response.getContent()).isEqualTo("Hello there");
+    }
+
+    @Test
+    void asyncStreamingResetsThenFallsBackAfterAMidStreamFailure() {
+        Recorder recorder = new Recorder();
+        LlmRouter router = new LlmRouter(List.of(
+                streamingAdapter(Provider.ANTHROPIC, List.of("Partial"), new RuntimeException("connection dropped")),
+                streamingAdapter(Provider.OPENAI, List.of("Recovered ", "answer"), null)));
+
+        Response response = router.completeStreamingAsync(request(), recorder).join();
+
+        assertThat(recorder.events).containsExactly("Partial", "<reset>", "Recovered ", "answer");
+        assertThat(response.getProviderUsed()).isEqualTo(Provider.OPENAI);
+        assertThat(response.getAttempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.getReason()).isEqualTo("connection dropped"));
+    }
+
+    @Test
+    void asyncStreamingFailsWithTheListenersOwnExceptionWithoutFallback() {
+        IllegalStateException listenerBug = new IllegalStateException("ui closed");
+        Recorder recorder = new Recorder() {
+            @Override
+            public void onText(String delta) {
+                super.onText(delta);
+                throw listenerBug;
+            }
+        };
+        LlmRouter router = new LlmRouter(List.of(
+                streamingAdapter(Provider.ANTHROPIC, List.of("Hel", "lo"), null),
+                mustNotBeCalled(Provider.OPENAI)));
+
+        CompletableFuture<Response> future = router.completeStreamingAsync(request(), recorder);
+
+        assertThatThrownBy(future::join).isInstanceOf(CompletionException.class).hasCause(listenerBug);
+        assertThat(recorder.events).containsExactly("Hel");
+    }
+
+    @Test
+    void asyncStreamingExhaustionFailsTheFuture() {
+        LlmRouter router = new LlmRouter(List.of(
+                streamingAdapter(Provider.ANTHROPIC, List.of(), new RuntimeException("down")),
+                streamingAdapter(Provider.OPENAI, List.of(), new RuntimeException("also down"))));
+
+        CompletableFuture<Response> future = router.completeStreamingAsync(request(), delta -> { });
+
+        assertThatThrownBy(future::join).hasCauseInstanceOf(RouterExhaustedException.class);
+        assertThatThrownBy(() -> router.completeStreamingAsync(request(), null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

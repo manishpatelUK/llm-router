@@ -75,4 +75,15 @@ public interface ProviderAdapter {
         }
         return response;
     }
+
+    /**
+     * Async counterpart of {@link #sendStreaming}. The default implementation runs
+     * {@link #sendStreaming} on a fresh virtual thread, so an adapter that streams natively keeps
+     * streaming (with {@code onText} called from that thread) and one that doesn't still delivers
+     * its whole text in one piece. Override it only for a provider with a genuinely non-blocking
+     * streaming API.
+     */
+    default CompletableFuture<Response> sendStreamingAsync(String model, Request adaptedRequest, Consumer<String> onText) {
+        return CompletableFuture.supplyAsync(() -> sendStreaming(model, adaptedRequest, onText), DEFAULT_ASYNC_EXECUTOR);
+    }
 }

@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -168,31 +169,89 @@ public final class LlmRouter {
         Objects.requireNonNull(listener, "listener must not be null");
         try {
             return completeVia(request, (adapter, model, toSend) -> {
-                boolean[] streamed = {false};
+                StreamingAttempt attempt = new StreamingAttempt(listener);
                 try {
-                    return adapter.sendStreaming(model, toSend, delta -> {
-                        if (delta != null && !delta.isEmpty()) {
-                            streamed[0] = true;
-                            try {
-                                listener.onText(delta);
-                            } catch (RuntimeException e) {
-                                throw new ListenerFailure(e);
-                            }
-                        }
-                    });
+                    return adapter.sendStreaming(model, toSend, attempt::deliver);
                 } catch (RuntimeException e) {
-                    ListenerFailure listenerFailure = ListenerFailure.findIn(e);
-                    if (listenerFailure != null) {
-                        throw listenerFailure; // unwrapped from anything the adapter or SDK added
-                    }
-                    if (streamed[0]) {
-                        listener.onReset();
-                    }
+                    attempt.failed(e);
                     throw e;
                 }
             });
         } catch (ListenerFailure e) {
             throw e.listenerException();
+        }
+    }
+
+    /**
+     * Async counterpart of {@link #completeStreaming}, with the same contract: text streams to
+     * {@code listener} as it's generated, {@link StreamListener#onReset()} precedes a fallback
+     * after a mid-stream failure, and an exception from {@code listener} itself fails the returned
+     * future with that exception, unchanged and without fallback. The listener is called from a
+     * background thread, one call at a time and in order.
+     *
+     * <p>Like {@link #completeAsync(Request)}, invalid requests fail the returned future rather
+     * than throwing.
+     */
+    public CompletableFuture<Response> completeStreamingAsync(Request request, StreamListener listener) {
+        Objects.requireNonNull(listener, "listener must not be null");
+        return completeAsyncVia(request, (adapter, model, toSend) -> {
+            StreamingAttempt attempt = new StreamingAttempt(listener);
+            CompletableFuture<Response> sent;
+            try {
+                sent = adapter.sendStreamingAsync(model, toSend, attempt::deliver);
+            } catch (RuntimeException e) {
+                sent = CompletableFuture.failedFuture(e);
+            }
+            return sent.exceptionally(throwable -> {
+                Throwable cause = unwrap(throwable);
+                attempt.failed(cause);
+                throw new CompletionException(cause);
+            });
+        });
+    }
+
+    /**
+     * One attempt's view of a {@link StreamListener}: forwards non-empty text, remembers whether
+     * any was delivered, and turns anything the listener throws into a {@link ListenerFailure}.
+     */
+    private static final class StreamingAttempt {
+
+        private final StreamListener listener;
+        private volatile boolean streamed;
+
+        StreamingAttempt(StreamListener listener) {
+            this.listener = listener;
+        }
+
+        void deliver(String delta) {
+            if (delta == null || delta.isEmpty()) {
+                return;
+            }
+            streamed = true;
+            try {
+                listener.onText(delta);
+            } catch (RuntimeException e) {
+                throw new ListenerFailure(e);
+            }
+        }
+
+        /**
+         * Called when the attempt failed with {@code e}. Throws the {@link ListenerFailure} if the
+         * listener caused it (unwrapped from anything the adapter or SDK added); otherwise resets
+         * the listener if it had received text, so the caller can go on to the next candidate.
+         */
+        void failed(Throwable e) {
+            ListenerFailure listenerFailure = ListenerFailure.findIn(e);
+            if (listenerFailure != null) {
+                throw listenerFailure;
+            }
+            if (streamed) {
+                try {
+                    listener.onReset();
+                } catch (RuntimeException resetFailure) {
+                    throw new ListenerFailure(resetFailure);
+                }
+            }
         }
     }
 
@@ -287,6 +346,17 @@ public final class LlmRouter {
 
     /** The canonical, most general async call — every other {@code completeAsync} overload delegates here. */
     public CompletableFuture<Response> completeAsync(Request request) {
+        return completeAsyncVia(request, ProviderAdapter::sendAsync);
+    }
+
+    /** How one async attempt is sent: plain or streaming. */
+    @FunctionalInterface
+    private interface AsyncSender {
+        CompletableFuture<Response> send(ProviderAdapter adapter, String model, Request toSend);
+    }
+
+    /** The shared async fallback loop behind {@link #completeAsync(Request)} and {@link #completeStreamingAsync}. */
+    private CompletableFuture<Response> completeAsyncVia(Request request, AsyncSender sender) {
         try {
             validate(request);
         } catch (RuntimeException e) {
@@ -294,7 +364,7 @@ public final class LlmRouter {
         }
         RouterConfig config = resolveConfig(request);
         List<RouteEntry> candidates = resolveCandidates(request, config);
-        return attemptAsync(request, candidates, 0, new ArrayList<>());
+        return attemptAsync(request, candidates, 0, new ArrayList<>(), sender);
     }
 
     /**
@@ -311,7 +381,8 @@ public final class LlmRouter {
         });
     }
 
-    private CompletableFuture<Response> attemptAsync(Request request, List<RouteEntry> candidates, int index, List<AttemptRecord> attempts) {
+    private CompletableFuture<Response> attemptAsync(
+            Request request, List<RouteEntry> candidates, int index, List<AttemptRecord> attempts, AsyncSender sender) {
         if (index >= candidates.size()) {
             log.error("Router exhausted after {} attempt(s)", attempts.size());
             return CompletableFuture.failedFuture(new RouterExhaustedException(attempts));
@@ -324,7 +395,7 @@ public final class LlmRouter {
         String skipReason = skipReason(adapter, candidate, modelEntry, request, config);
         if (skipReason != null) {
             attempts.add(recordSkip(candidate, skipReason));
-            return attemptAsync(request, candidates, index + 1, attempts);
+            return attemptAsync(request, candidates, index + 1, attempts, sender);
         }
 
         NegotiationResult negotiation = negotiate(modelEntry, request, config);
@@ -334,20 +405,25 @@ public final class LlmRouter {
             toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
         } catch (RuntimeException e) {
             attempts.add(recordFailure(candidate, e));
-            return attemptAsync(request, candidates, index + 1, attempts);
+            return attemptAsync(request, candidates, index + 1, attempts, sender);
         }
 
-        return adapter.sendAsync(candidate.getModel(), toSend)
+        return sender.send(adapter, candidate.getModel(), toSend)
                 .handle((fragment, throwable) -> {
                     if (throwable == null) {
                         return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);
                     }
-                    attempts.add(recordFailure(candidate, unwrap(throwable)));
+                    Throwable cause = unwrap(throwable);
+                    if (cause instanceof ListenerFailure listenerFailure) {
+                        // the caller's listener broke, not the provider — never fall back on it
+                        throw new CompletionException(listenerFailure.listenerException());
+                    }
+                    attempts.add(recordFailure(candidate, cause));
                     return null;
                 })
                 .thenCompose(result -> result != null
                         ? CompletableFuture.completedFuture(result)
-                        : attemptAsync(request, candidates, index + 1, attempts));
+                        : attemptAsync(request, candidates, index + 1, attempts, sender));
     }
 
     private List<RouteEntry> resolveCandidates(Request request, RouterConfig config) {

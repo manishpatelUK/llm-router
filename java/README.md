@@ -179,7 +179,16 @@ Response response = router.completeStreaming(request, new StreamListener() {
 // response.getContent() is the full text; tool calls, usage etc. are on the response as usual.
 ```
 
-Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. Anthropic and OpenAI stream natively. Other providers deliver their text in one piece, so the call works everywhere. See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. Anthropic and OpenAI stream natively. Other providers deliver their text in one piece, so the call works everywhere. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
+
+`completeStreamingAsync(request, listener)` is the non-blocking form. It returns a `CompletableFuture<Response>` and follows the same rules. The listener is called from a background thread, one piece at a time and in order, so hand the text to your UI thread if your toolkit requires it:
+
+```java
+router.completeStreamingAsync(request, delta -> ui.appendLater(delta))
+    .thenAccept(response -> ui.done(response));
+```
+
+See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
 

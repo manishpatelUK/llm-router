@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -64,6 +65,29 @@ class StreamingAdaptersTest {
         assertThat(response.getContent()).isEqualTo("Hello there");
         assertThat(response.getUsage().getInputTokens()).isEqualTo(10);
         assertThat(response.getUsage().getOutputTokens()).isEqualTo(5);
+        assertThat(requestBody.get()).contains("\"stream\":true");
+    }
+
+    @Test
+    void theAsyncDefaultKeepsANativeAdapterStreamingOnABackgroundThread() {
+        sse = anthropicEvents(
+                "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}",
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo there\"}}",
+                "{\"type\":\"content_block_stop\",\"index\":0}");
+        AnthropicAdapter adapter = new AnthropicAdapter(AnthropicOkHttpClient.builder().apiKey("test").baseUrl(base).build());
+        List<String> deltas = new CopyOnWriteArrayList<>();
+        Thread caller = Thread.currentThread();
+        List<Thread> deliveringThreads = new CopyOnWriteArrayList<>();
+
+        Response response = adapter.sendStreamingAsync("claude-opus-5", Request.builder().prompt("Hi").build(), delta -> {
+            deliveringThreads.add(Thread.currentThread());
+            deltas.add(delta);
+        }).join();
+
+        assertThat(deltas).containsExactly("Hel", "lo there");
+        assertThat(deliveringThreads).doesNotContain(caller);
+        assertThat(response.getContent()).isEqualTo("Hello there");
         assertThat(requestBody.get()).contains("\"stream\":true");
     }
 
