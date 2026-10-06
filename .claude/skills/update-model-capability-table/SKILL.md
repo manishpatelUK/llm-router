@@ -37,6 +37,7 @@ For each provider in scope, don't just re-check the models already sitting in th
 Using the source priority order from `MODEL_CAPABILITY_HEURISTICS.md` § Data sources:
 
 - **`anthropic`**: invoke the `claude-api` skill (or read its bundled model/pricing reference directly) rather than web-searching — it's actively maintained and authoritative for Anthropic model IDs, pricing, and capability flags.
+- **Embedding models** (`embeddingModels`, see `MODEL_CAPABILITY_HEURISTICS.md` § Cost fields): for each provider in scope whose adapter implements embeddings (today only `openai`), re-check its embedding models' prices and lineup from the same pricing source as its chat models.
 - **`openai`**: WebFetch `https://openai.com/api/pricing/` first. If blocked (403/429 — this happens), fall back to a pricing aggregator (WebSearch for one, e.g. a site that tabulates OpenAI's current per-model rates) and cross-check the numbers look internally consistent (flagship > mid > mini > nano pricing ordering).
 - **`perplexity`**: WebFetch `https://docs.perplexity.ai/getting-started/pricing` (or current equivalent — WebSearch if the path has moved).
 - **`nvidia`**: WebFetch `https://build.nvidia.com/models` for the current featured/popular model list, then a pricing aggregator or NVIDIA's own pricing docs for per-model rates (NIM pricing is not always published as clean $/1M-token rates — note where you had to estimate).
@@ -71,7 +72,7 @@ First make your in-memory edits (additions, updates, removals) to the model list
 Then finalize the file with a **local Node script that reads and writes the file directly** (don't hand-edit the JSON for this part — de-duplication and timestamping should be done programmatically so they're exact, not eyeballed). The script must:
 
 1. Read and `JSON.parse` `model-capability-table.json`.
-2. **De-duplicate `models` by the `provider` + `model` pair as primary key** — if two rows share the same `provider`+`model`, keep only the **last** one in array order (this is also what makes it safe for you to just push a corrected/updated row onto the end of the array during editing rather than hunting down and mutating the original in place).
+2. **De-duplicate `models`, and separately `embeddingModels`, by the `provider` + `model` pair as primary key** — if two rows share the same `provider`+`model`, keep only the **last** one in array order (this is also what makes it safe for you to just push a corrected/updated row onto the end of the array during editing rather than hunting down and mutating the original in place).
 3. **Stamp every surviving row's `lastUpdated`** with the current UTC timestamp — `new Date().toISOString()` — regardless of whether that specific row's data changed this run, since `lastUpdated` here means "last verified as of," not "last changed." Also set the top-level `lastUpdated` to the same timestamp.
 4. Write the result back with stable 2-space-indented JSON (`JSON.stringify(data, null, 2)`) plus a trailing newline.
 
@@ -82,12 +83,16 @@ const filePath = 'model-capability-table.json';
 const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
 const nowIso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-const byKey = new Map();
-for (const entry of data.models) byKey.set(`${entry.provider}::${entry.model}`, entry);
-const deduped = Array.from(byKey.values());
-for (const entry of deduped) entry.lastUpdated = nowIso;
+const dedupeAndStamp = (rows = []) => {
+  const byKey = new Map();
+  for (const entry of rows) byKey.set(`${entry.provider}::${entry.model}`, entry);
+  const deduped = Array.from(byKey.values());
+  for (const entry of deduped) entry.lastUpdated = nowIso;
+  return deduped;
+};
 
-data.models = deduped;
+data.models = dedupeAndStamp(data.models);
+data.embeddingModels = dedupeAndStamp(data.embeddingModels);
 data.lastUpdated = nowIso;
 fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf8');
 ```

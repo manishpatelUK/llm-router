@@ -324,6 +324,7 @@ public final class LlmRouter {
                 return fragment.toBuilder()
                         .providerUsed(candidate.getProvider())
                         .modelUsed(model)
+                        .usage(priceEmbedding(candidate.getProvider(), model, fragment.getUsage()))
                         .attempts(List.copyOf(attempts))
                         .build();
             } catch (RuntimeException e) {
@@ -331,6 +332,19 @@ public final class LlmRouter {
             }
         }
         throw new RouterExhaustedException(attempts);
+    }
+
+    /**
+     * Fills in an embedding call's cost from the table's embedding prices (§7.3). A model with no
+     * row there keeps a cost of 0, as an unknown chat model does; its token count is still reported.
+     */
+    private static Usage priceEmbedding(Provider provider, String model, Usage usage) {
+        if (usage == null) {
+            return null;
+        }
+        return ModelCapabilityTable.findEmbeddingModel(provider, model)
+                .map(entry -> withEstimatedCost(usage, (usage.getInputTokens() / 1_000_000.0) * entry.getInputCostPerMillionTokens()))
+                .orElse(usage);
     }
 
     /** How one attempt is sent: plain or streaming. */
@@ -580,7 +594,7 @@ public final class LlmRouter {
 
         Usage usage = modelEntry == null
                 ? fragment.getUsage()
-                : fragment.getUsage().toBuilder().estimatedCostUsdCents(estimateCostCents(modelEntry, fragment.getUsage())).build();
+                : withEstimatedCost(fragment.getUsage(), estimateCostUsd(modelEntry, fragment.getUsage()));
 
         Map<String, Object> structuredOutput = null;
         if (originalRequest.getResponseSchema() != null && !negotiation.getDroppedFeatures().contains("responseSchema")) {
@@ -601,10 +615,18 @@ public final class LlmRouter {
         return response;
     }
 
-    private static int estimateCostCents(ModelEntry model, Usage usage) {
+    private static double estimateCostUsd(ModelEntry model, Usage usage) {
         double inputCost = (usage.getInputTokens() / 1_000_000.0) * model.getInputCostPerMillionTokens();
         double outputCost = (usage.getOutputTokens() / 1_000_000.0) * model.getOutputCostPerMillionTokens();
-        return (int) Math.round((inputCost + outputCost) * 100.0);
+        return inputCost + outputCost;
+    }
+
+    /** Sets both cost fields from one dollar figure, so cents and micro-dollars never disagree. */
+    private static Usage withEstimatedCost(Usage usage, double costUsd) {
+        return usage.toBuilder()
+                .estimatedCostUsdCents((int) Math.round(costUsd * 100.0))
+                .estimatedCostUsdMicros(Math.round(costUsd * 1_000_000.0))
+                .build();
     }
 
     private static Map<String, Object> tryParseStructuredOutput(String content) {

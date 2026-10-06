@@ -325,9 +325,9 @@ class LlmRouterTest {
 
         Response response = router.complete("hi", config);
 
-        // (10/1_000_000)*2.0 + (5/1_000_000)*4.0 dollars = 4.0e-5 dollars = 0.004 cents -> rounds to 0
-        // Use larger token counts via a custom fragment to get a non-zero, easily-asserted value instead:
-        assertThat(response.getUsage().getEstimatedCostUsdCents()).isGreaterThanOrEqualTo(0);
+        // (10/1_000_000)*2.0 + (5/1_000_000)*4.0 dollars = 4.0e-5 dollars = 40 micro-dollars = 0.004 cents
+        assertThat(response.getUsage().getEstimatedCostUsdMicros()).isEqualTo(40);
+        assertThat(response.getUsage().getEstimatedCostUsdCents()).isZero(); // whole cents round it away
     }
 
     @Test

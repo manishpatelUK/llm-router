@@ -22,8 +22,9 @@ public class EmbeddingResponse {
     String modelUsed;
 
     /**
-     * Input tokens consumed. {@code estimatedCostUsdCents} is 0: the capability table has no
-     * embedding-model pricing yet.
+     * Input tokens consumed, and the cost estimated from the capability table's embedding prices
+     * (0 for a model the table doesn't price). Read {@code estimatedCostUsdMicros}: embedding calls
+     * usually cost well under a cent, so {@code estimatedCostUsdCents} is usually 0.
      */
     Usage usage;
 

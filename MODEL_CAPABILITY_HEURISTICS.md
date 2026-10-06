@@ -24,6 +24,8 @@ Never fabricate a number. If a field genuinely can't be found after checking the
 
 `inputCostPerMillionTokens` / `outputCostPerMillionTokens` — pull directly from the source, in USD, per million tokens, standard (non-batch, non-cached) rate. Don't use batch or cached-input discount rates — the router's cost-optimized ordering (`LIBRARY_SPEC.md` §5.3) reasons about standard-rate cost; a language implementation is free to layer batch/cache-aware pricing on top later, but the seed table should reflect the baseline rate every request pays.
 
+**Embedding models** go in the separate `embeddingModels` list (`LIBRARY_SPEC.md` §7.3), never in `models`, so chat routing can't select one. Each row has only `inputCostPerMillionTokens` (standard rate; embeddings have no output tokens), the default `dimensions`, `maxInputTokens`, and `lastUpdated`, with no scores or capability flags. Cover the embedding models of every provider whose adapter implements embeddings; today that's OpenAI only. Remove retired models as for chat rows.
+
 ## `thinkingScore` (0–10)
 
 Intended to be roughly comparable *across* providers, even though the §7.2 selection heuristic only ever compares within one provider's own range at call time — comparability across providers still matters for humans auditing the table and for the cost-optimized "qualifying set" tolerance band.

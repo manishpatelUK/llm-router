@@ -91,7 +91,7 @@ Routing differs from chat, because vectors from different models aren't comparab
 - With no `route`, the first available provider whose adapter offers embeddings is used, with its default embedding model, and nothing else is tried.
 - With a `route`, candidates are tried in order, and fallback happens only across the candidates the caller listed. A provider-only entry uses that provider's default embedding model.
 - Callers should store `modelUsed` beside their vectors and compare only vectors from the same model.
-- Embedding models aren't in the capability table (§7), so `estimatedCostUsdCents` is 0 for now.
+- Cost is estimated from the table's embedding prices (§7.3): input tokens × the model's `inputCostPerMillionTokens`, reported in both `usage` cost fields. A model with no price row there reports its tokens with a cost of 0, as an unknown chat model does.
 
 ### Response shape
 
@@ -109,6 +109,8 @@ Response {
     outputTokens: int
     reasoningTokens: int
     estimatedCostUsd: int              // converted to cents to avoid floating point issues
+    estimatedCostUsdMicros: int        // the same estimate in millionths of a dollar; whole cents round most
+                                        // small calls to 0, so sum this one when tracking spend across calls
   }
   droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
   attempts: AttemptRecord[]            // one entry per candidate tried before success (empty if first candidate succeeded)
@@ -342,6 +344,23 @@ Algorithm:
 5. Break ties, in order: (a) higher `speedScore`, (b) lower combined input+output cost, (c) alphabetical `model` id — so selection is deterministic.
 
 For cost-optimized expansion (§5.3), instead of collapsing to a single closest match in step 4, take **all models within a 1 point thinkingScore tolerance band** of the target score as the "qualifying set", then sort that set ascending by estimated cost for the actual prompt. If no model falls inside the band (a lineup with a gap around the target), widen it just enough to include the closest model(s) to the target, so the qualifying set is never empty: turning on `costOptimized` must never remove a provider from the route that would have served it without it.
+
+### 7.3 Embedding models
+
+Embedding models are priced in their own list in the same file, `embeddingModels`, not in `models`. They have no thinking/speed scores or chat capability flags, and chat routing (§5, §7.2) must never select one, so keeping them out of `models` keeps every chat-routing rule unchanged.
+
+```
+EmbeddingModelEntry {
+  provider: string                     // canonical provider ID, §12.1
+  model: string                        // provider-defined model id, e.g. "text-embedding-3-small"
+  inputCostPerMillionTokens: number    // USD, standard (non-batch) rate; embeddings have no output tokens
+  dimensions: int                      // default vector length
+  maxInputTokens: int                  // most tokens one input text may contain
+  lastUpdated: string                  // ISO 8601 UTC, as for ModelEntry
+}
+```
+
+`provider` + `model` is the primary key, as in §7.1. Implementations should let callers register and remove embedding rows at runtime, as they do chat rows, so a model the seed file doesn't list can still be priced. The only use the router makes of these rows is pricing `embed` calls (§3.2): the model itself is chosen by the request's `route` or the adapter's default.
 
 ---
 

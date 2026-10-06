@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-10-05T20:40:25Z",
+  "lastUpdated": "2026-10-06T16:01:31Z",
   "notes": "Seed data. Pricing and lineups change frequently — treat as best-effort and refresh periodically. See MODEL_CAPABILITY_HEURISTICS.md for the scoring methodology and the update-model-capability-table skill for the refresh procedure. Hugging Face is intentionally excluded (too many models to seed meaningfully) — add entries there yourself via registerModel(). OpenRouter entries are limited to models not already covered by the anthropic/openai/perplexity entries below (per project decision), to avoid redundant duplicate listings of the same underlying models.",
   "models": [
     {
@@ -452,6 +452,32 @@
       "supportsTemperature": true,
       "supportsTopP": true,
       "lastUpdated": "2026-10-05T19:22:14Z"
+    }
+  ],
+  "embeddingModels": [
+    {
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "inputCostPerMillionTokens": 0.02,
+      "dimensions": 1536,
+      "maxInputTokens": 8191,
+      "lastUpdated": "2026-10-06T16:01:31Z"
+    },
+    {
+      "provider": "openai",
+      "model": "text-embedding-3-large",
+      "inputCostPerMillionTokens": 0.13,
+      "dimensions": 3072,
+      "maxInputTokens": 8191,
+      "lastUpdated": "2026-10-06T16:01:31Z"
+    },
+    {
+      "provider": "openai",
+      "model": "text-embedding-ada-002",
+      "inputCostPerMillionTokens": 0.1,
+      "dimensions": 1536,
+      "maxInputTokens": 8191,
+      "lastUpdated": "2026-10-06T16:01:31Z"
     }
   ]
 }

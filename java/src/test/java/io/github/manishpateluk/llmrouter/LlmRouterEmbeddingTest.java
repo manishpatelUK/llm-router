@@ -132,6 +132,60 @@ class LlmRouterEmbeddingTest {
         }
     }
 
+    @Test
+    void costIsEstimatedFromTheTablesEmbeddingPricesInCentsAndMicroDollars() {
+        // text-embedding-3-small is $0.02 per million input tokens in the seed table
+        LlmRouter large = new LlmRouter(List.of(tokens(Provider.OPENAI, "text-embedding-3-small", 2_000_000)));
+        LlmRouter small = new LlmRouter(List.of(tokens(Provider.OPENAI, "text-embedding-3-small", 2_000)));
+
+        Usage largeUsage = large.embed(EmbeddingRequest.builder().text("x").build()).getUsage();
+        Usage smallUsage = small.embed(EmbeddingRequest.builder().text("x").build()).getUsage();
+
+        assertThat(largeUsage.getEstimatedCostUsdMicros()).isEqualTo(40_000); // $0.04
+        assertThat(largeUsage.getEstimatedCostUsdCents()).isEqualTo(4);
+        assertThat(smallUsage.getEstimatedCostUsdMicros()).isEqualTo(40); // $0.00004: too small for whole cents
+        assertThat(smallUsage.getEstimatedCostUsdCents()).isZero();
+        assertThat(smallUsage.getInputTokens()).isEqualTo(2_000);
+    }
+
+    @Test
+    void aModelWithNoEmbeddingPriceKeepsZeroCostButStillReportsTokens() {
+        LlmRouter router = new LlmRouter(List.of(tokens(Provider.OPENAI, "not-in-the-table", 5_000)));
+
+        Usage usage = router.embed(EmbeddingRequest.builder().text("x").build()).getUsage();
+
+        assertThat(usage.getInputTokens()).isEqualTo(5_000);
+        assertThat(usage.getEstimatedCostUsdMicros()).isZero();
+        assertThat(usage.getEstimatedCostUsdCents()).isZero();
+    }
+
+    /** An embedding adapter whose default model reports a fixed number of input tokens per call. */
+    private static ProviderAdapter tokens(Provider id, String defaultModel, int inputTokens) {
+        return new ProviderAdapter() {
+            public Provider id() {
+                return id;
+            }
+
+            public boolean isAvailable() {
+                return true;
+            }
+
+            public Response send(String model, Request request) {
+                throw new UnsupportedOperationException();
+            }
+
+            public String defaultEmbeddingModel() {
+                return defaultModel;
+            }
+
+            public EmbeddingResponse embed(String model, List<String> texts, Integer dimensions) {
+                List<float[]> vectors = new ArrayList<>();
+                texts.forEach(text -> vectors.add(new float[]{1f}));
+                return EmbeddingResponse.builder().vectors(vectors).usage(Usage.builder().inputTokens(inputTokens).build()).build();
+            }
+        };
+    }
+
     private static ProviderAdapter chatOnly(Provider id) {
         return new ProviderAdapter() {
             public Provider id() {

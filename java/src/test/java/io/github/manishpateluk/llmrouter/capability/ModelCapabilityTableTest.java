@@ -18,6 +18,35 @@ class ModelCapabilityTableTest {
     @AfterEach
     void cleanUpRegisteredFixtures() {
         ModelCapabilityTable.removeModel(Provider.OPENROUTER, FIXTURE_MODEL);
+        ModelCapabilityTable.removeEmbeddingModel(Provider.OPENROUTER, FIXTURE_MODEL);
+    }
+
+    @Test
+    void seedEmbeddingPricesLoadAndStayOutOfTheChatModelList() {
+        EmbeddingModelEntry small = ModelCapabilityTable.findEmbeddingModel(Provider.OPENAI, "text-embedding-3-small").orElseThrow();
+
+        assertThat(small.getInputCostPerMillionTokens()).isEqualTo(0.02);
+        assertThat(small.getDimensions()).isEqualTo(1536);
+        assertThat(ModelCapabilityTable.listEmbeddingModels()).extracting(EmbeddingModelEntry::getModel)
+                .contains("text-embedding-3-small", "text-embedding-3-large");
+        assertThat(ModelCapabilityTable.listModels()).extracting(ModelEntry::getModel)
+                .noneMatch(model -> model.startsWith("text-embedding"));
+    }
+
+    @Test
+    void embeddingModelsCanBeRegisteredAndRemoved() {
+        EmbeddingModelEntry fixture = EmbeddingModelEntry.builder()
+                .provider(Provider.OPENROUTER).model(FIXTURE_MODEL)
+                .inputCostPerMillionTokens(0.5).dimensions(768).maxInputTokens(512)
+                .lastUpdated(Instant.parse("2026-01-01T00:00:00Z"))
+                .build();
+
+        ModelCapabilityTable.registerEmbeddingModel(fixture);
+        assertThat(ModelCapabilityTable.findEmbeddingModel(Provider.OPENROUTER, FIXTURE_MODEL)).contains(fixture);
+        assertThat(ModelCapabilityTable.findModel(Provider.OPENROUTER, FIXTURE_MODEL)).isEmpty();
+
+        assertThat(ModelCapabilityTable.removeEmbeddingModel(Provider.OPENROUTER, FIXTURE_MODEL)).isTrue();
+        assertThat(ModelCapabilityTable.findEmbeddingModel(Provider.OPENROUTER, FIXTURE_MODEL)).isEmpty();
     }
 
     @Test

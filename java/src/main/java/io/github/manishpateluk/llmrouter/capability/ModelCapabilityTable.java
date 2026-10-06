@@ -37,9 +37,16 @@ public final class ModelCapabilityTable {
 
     private static final String RESOURCE_PATH = "/model-capability-table.json";
 
-    private static final List<ModelEntry> MODELS = new CopyOnWriteArrayList<>(loadSeedModels());
+    private static final CapabilityTableFile SEED = loadSeed();
 
-    /** Guards compound add/replace/remove operations; MODELS itself is safe for concurrent reads. */
+    private static final List<ModelEntry> MODELS = new CopyOnWriteArrayList<>(
+            SEED.getModels() == null ? List.of() : SEED.getModels());
+
+    /** Embedding models (§7.3) — priced separately and never offered to chat routing. */
+    private static final List<EmbeddingModelEntry> EMBEDDING_MODELS = new CopyOnWriteArrayList<>(
+            SEED.getEmbeddingModels() == null ? List.of() : SEED.getEmbeddingModels());
+
+    /** Guards compound add/replace/remove operations; the lists themselves are safe for concurrent reads. */
     private static final Object WRITE_LOCK = new Object();
 
     private ModelCapabilityTable() {
@@ -132,19 +139,65 @@ public final class ModelCapabilityTable {
         return MODELS.size();
     }
 
+    // ---- Embedding models (§7.3) ----
+
+    /**
+     * Returns every embedding model currently registered. These rows price {@code LlmRouter.embed}
+     * calls; they are never returned by {@link #listModels()} or considered by chat routing.
+     *
+     * @return an immutable snapshot; later mutations are not reflected in it
+     */
+    public static List<EmbeddingModelEntry> listEmbeddingModels() {
+        return List.copyOf(EMBEDDING_MODELS);
+    }
+
+    /** Looks up one embedding model by its {@code provider}+{@code model} primary key. */
+    public static Optional<EmbeddingModelEntry> findEmbeddingModel(Provider provider, String model) {
+        Objects.requireNonNull(provider, "provider must not be null");
+        Objects.requireNonNull(model, "model must not be null");
+        return EMBEDDING_MODELS.stream()
+                .filter(entry -> entry.getProvider() == provider && entry.getModel().equals(model))
+                .findFirst();
+    }
+
+    /**
+     * Adds a new embedding model, or replaces the existing entry with the same {@code provider}+
+     * {@code model} primary key — e.g. to price a model the seed table doesn't list.
+     */
+    public static void registerEmbeddingModel(EmbeddingModelEntry entry) {
+        Objects.requireNonNull(entry, "entry must not be null");
+        synchronized (WRITE_LOCK) {
+            EMBEDDING_MODELS.removeIf(existing -> existing.getProvider() == entry.getProvider()
+                    && existing.getModel().equals(entry.getModel()));
+            EMBEDDING_MODELS.add(entry);
+        }
+    }
+
+    /**
+     * Removes the embedding model with the given {@code provider}+{@code model} primary key, if present.
+     *
+     * @return {@code true} if a matching entry was removed, {@code false} if none existed
+     */
+    public static boolean removeEmbeddingModel(Provider provider, String model) {
+        Objects.requireNonNull(provider, "provider must not be null");
+        Objects.requireNonNull(model, "model must not be null");
+        synchronized (WRITE_LOCK) {
+            return EMBEDDING_MODELS.removeIf(existing -> existing.getProvider() == provider && existing.getModel().equals(model));
+        }
+    }
+
     private static boolean matches(ModelEntry entry, Provider provider, String model) {
         return entry.getProvider() == provider && entry.getModel().equals(model);
     }
 
-    private static List<ModelEntry> loadSeedModels() {
+    private static CapabilityTableFile loadSeed() {
         ObjectMapper mapper = new ObjectMapper();
         try (InputStream in = ModelCapabilityTable.class.getResourceAsStream(RESOURCE_PATH)) {
             if (in == null) {
                 throw new IllegalStateException(
                         "Could not find " + RESOURCE_PATH + " on the classpath");
             }
-            CapabilityTableFile file = mapper.readValue(in, CapabilityTableFile.class);
-            return file.getModels() == null ? List.of() : file.getModels();
+            return mapper.readValue(in, CapabilityTableFile.class);
         } catch (IOException e) {
             throw new UncheckedIOException(
                     "Failed to load model capability table from " + RESOURCE_PATH, e);
@@ -163,5 +216,6 @@ public final class ModelCapabilityTable {
         Instant lastUpdated;
         String notes;
         List<ModelEntry> models;
+        List<EmbeddingModelEntry> embeddingModels;
     }
 }

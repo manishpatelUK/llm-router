@@ -206,6 +206,7 @@ response.getModelUsed();   // store this with the vectors: only same-model vecto
 
 - **Which model.** With no `route`, the first available provider that offers embeddings is used, with its default model. Today that's OpenAI's `text-embedding-3-small`.
 - **No silent fallback.** It doesn't fall back to other models unless you list them in `route`, because different models' vectors can't be compared.
+- **Cost.** `response.getUsage()` reports input tokens and an estimated cost from the table's embedding prices (OpenAI's three embedding models are seeded). Read `getEstimatedCostUsdMicros()`, in millionths of a dollar: a typical embedding call costs far less than a cent, so `getEstimatedCostUsdCents()` is usually 0. To price a model the table doesn't list, register it with `ModelCapabilityTable.registerEmbeddingModel(...)`.
 - **Custom adapters.** An adapter adds embeddings by overriding `defaultEmbeddingModel()` and `embed(...)`. See §3.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
