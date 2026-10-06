@@ -26,6 +26,8 @@ import io.github.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
 import io.github.manishpateluk.llmrouter.error.RouterExhaustedException;
 import io.github.manishpateluk.llmrouter.model.AttemptOutcome;
 import io.github.manishpateluk.llmrouter.model.AttemptRecord;
+import io.github.manishpateluk.llmrouter.model.EmbeddingRequest;
+import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
 import io.github.manishpateluk.llmrouter.model.Message;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
@@ -277,6 +279,58 @@ public final class LlmRouter {
             }
             return null;
         }
+    }
+
+    /**
+     * Turns texts into embedding vectors — see {@link EmbeddingRequest} and {@code LIBRARY_SPEC.md}
+     * §3.2. Tries {@code request.route} in order (falling back only across the candidates listed
+     * there, since different models' vectors aren't comparable), or with no route, the first
+     * available provider's default embedding model alone.
+     *
+     * @throws RouterExhaustedException if no candidate could embed the texts
+     */
+    public EmbeddingResponse embed(EmbeddingRequest request) {
+        Objects.requireNonNull(request, "request must not be null");
+        if (request.getTexts() == null || request.getTexts().isEmpty()) {
+            throw new IllegalArgumentException("EmbeddingRequest.texts must not be empty");
+        }
+        List<RouteEntry> candidates = request.getRoute();
+        if (candidates == null || candidates.isEmpty()) {
+            candidates = availableProviders().stream()
+                    .filter(provider -> adapters.get(provider).defaultEmbeddingModel() != null)
+                    .findFirst()
+                    .map(provider -> List.of(RouteEntry.of(provider)))
+                    .orElseThrow(() -> new NoProvidersConfiguredException(
+                            "No configured provider offers embeddings (e.g. set OPENAI_API_KEY)"));
+        }
+        List<AttemptRecord> attempts = new ArrayList<>();
+        for (RouteEntry candidate : candidates) {
+            ProviderAdapter adapter = adapters.get(candidate.getProvider());
+            if (adapter == null || !adapter.isAvailable()) {
+                attempts.add(recordSkip(candidate, "no credentials"));
+                continue;
+            }
+            String model = candidate.getModel() != null ? candidate.getModel() : adapter.defaultEmbeddingModel();
+            if (model == null) {
+                attempts.add(recordSkip(candidate, "provider offers no embeddings"));
+                continue;
+            }
+            try {
+                EmbeddingResponse fragment = adapter.embed(model, request.getTexts(), request.getDimensions());
+                if (fragment.getVectors() == null || fragment.getVectors().size() != request.getTexts().size()) {
+                    throw new IllegalStateException("expected " + request.getTexts().size() + " vectors, got "
+                            + (fragment.getVectors() == null ? 0 : fragment.getVectors().size()));
+                }
+                return fragment.toBuilder()
+                        .providerUsed(candidate.getProvider())
+                        .modelUsed(model)
+                        .attempts(List.copyOf(attempts))
+                        .build();
+            } catch (RuntimeException e) {
+                attempts.add(recordFailure(RouteEntry.of(candidate.getProvider(), model), e));
+            }
+        }
+        throw new RouterExhaustedException(attempts);
     }
 
     /** How one attempt is sent: plain or streaming. */

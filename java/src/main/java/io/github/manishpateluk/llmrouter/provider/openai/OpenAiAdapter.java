@@ -32,6 +32,10 @@ import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.ResponseFormatJsonSchema;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.embeddings.CreateEmbeddingResponse;
+import com.openai.models.embeddings.Embedding;
+import com.openai.models.embeddings.EmbeddingCreateParams;
+import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
 import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionChunk;
 import com.openai.models.chat.completions.ChatCompletionContentPart;
@@ -116,6 +120,40 @@ public final class OpenAiAdapter implements ProviderAdapter {
     public CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         requireAvailable();
         return client.async().chat().completions().create(toParams(model, adaptedRequest)).thenApply(this::fromCompletion);
+    }
+
+    /** OpenAI's small, inexpensive embedding model (1536 dimensions by default). */
+    public static final String DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+
+    @Override
+    public String defaultEmbeddingModel() {
+        return DEFAULT_EMBEDDING_MODEL;
+    }
+
+    @Override
+    public EmbeddingResponse embed(String model, List<String> texts, Integer dimensions) {
+        requireAvailable();
+        EmbeddingCreateParams.Builder params = EmbeddingCreateParams.builder().model(model).inputOfArrayOfStrings(texts);
+        if (dimensions != null) {
+            params.dimensions(dimensions);
+        }
+        CreateEmbeddingResponse response = client.embeddings().create(params.build());
+        float[][] vectors = new float[texts.size()][];
+        for (Embedding embedding : response.data()) {
+            List<Float> values = embedding.embedding();
+            float[] vector = new float[values.size()];
+            for (int i = 0; i < vector.length; i++) {
+                vector[i] = values.get(i);
+            }
+            vectors[(int) embedding.index()] = vector;
+        }
+        return EmbeddingResponse.builder()
+                .vectors(List.of(vectors))
+                .usage(io.github.manishpateluk.llmrouter.model.Usage.builder()
+                        .inputTokens((int) response.usage().promptTokens())
+                        .outputTokens(0)
+                        .build())
+                .build();
     }
 
     /**

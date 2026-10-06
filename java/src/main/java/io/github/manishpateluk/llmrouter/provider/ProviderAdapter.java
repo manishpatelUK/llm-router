@@ -2,9 +2,11 @@ package io.github.manishpateluk.llmrouter.provider;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
+import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 
@@ -68,6 +70,25 @@ public interface ProviderAdapter {
      * {@link #send} and delivers the whole text in one piece — so every adapter supports
      * {@code LlmRouter.completeStreaming}; override it for providers with a native streaming API.
      */
+    /**
+     * The model {@code LlmRouter.embed} uses for this provider when a route names the provider but
+     * no model; {@code null} (the default) means this adapter offers no embeddings.
+     */
+    default String defaultEmbeddingModel() {
+        return null;
+    }
+
+    /**
+     * Embeds {@code texts} with {@code model}, returning one vector per text in order, and the
+     * tokens used. The default throws {@link UnsupportedOperationException}; adapters for providers
+     * with an embeddings API override it together with {@link #defaultEmbeddingModel()}.
+     *
+     * @param dimensions requested vector length, or {@code null} for the model's default
+     */
+    default EmbeddingResponse embed(String model, List<String> texts, Integer dimensions) {
+        throw new UnsupportedOperationException(id() + " adapter offers no embeddings");
+    }
+
     default Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
         Response response = send(model, adaptedRequest);
         if (response.getContent() != null && !response.getContent().isEmpty()) {

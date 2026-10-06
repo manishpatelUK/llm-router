@@ -190,6 +190,24 @@ router.completeStreamingAsync(request, delta -> ui.appendLater(delta))
 
 See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
+**Embeddings**, for semantic search:
+
+```java
+import io.github.manishpateluk.llmrouter.model.EmbeddingRequest;
+import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
+
+EmbeddingResponse response = router.embed(EmbeddingRequest.builder()
+    .text("Acme pays net 30")
+    .text("Globex pays on receipt")
+    .build());
+response.getVectors();     // one float[] per text, in order
+response.getModelUsed();   // store this with the vectors: only same-model vectors are comparable
+```
+
+- **Which model.** With no `route`, the first available provider that offers embeddings is used, with its default model. Today that's OpenAI's `text-embedding-3-small`.
+- **No silent fallback.** It doesn't fall back to other models unless you list them in `route`, because different models' vectors can't be compared.
+- **Custom adapters.** An adapter adds embeddings by overriding `defaultEmbeddingModel()` and `embed(...)`. See §3.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+
 **Handling exhaustion** (every candidate in the route failed or had no credentials):
 
 ```java

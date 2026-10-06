@@ -79,6 +79,20 @@ The error message should list every violation (not just the first), identifying 
 
 Schema keywords that some providers handle inconsistently (`oneOf`, `anyOf`, `$ref`) are deliberately **not** rejected or rewritten: every provider this library currently targets accepts them in tool parameters, and the Model Capability Table has no per-model flag to say otherwise. If a provider that rejects them is added, the right shape is a new capability flag plus negotiation (§4), not a blanket validation error.
 
+### 3.2 Embeddings
+
+`embed(request) -> EmbeddingResponse` turns texts into vectors, for semantic search. It is a separate call from chat completion:
+
+- `EmbeddingRequest`: `texts` (required, non-empty), an optional `route` (provider/model candidates, in order) and optional `dimensions`.
+- `EmbeddingResponse`: one vector per text in input order, `providerUsed`/`modelUsed`, `usage` (input tokens), and any `attempts`.
+
+Routing differs from chat, because vectors from different models aren't comparable:
+
+- With no `route`, the first available provider whose adapter offers embeddings is used, with its default embedding model, and nothing else is tried.
+- With a `route`, candidates are tried in order, and fallback happens only across the candidates the caller listed. A provider-only entry uses that provider's default embedding model.
+- Callers should store `modelUsed` beside their vectors and compare only vectors from the same model.
+- Embedding models aren't in the capability table (§7), so `estimatedCostUsdCents` is 0 for now.
+
 ### Response shape
 
 Implementations should try and fill in as much of the shape as possible, and omit if not possible.
@@ -356,6 +370,8 @@ ProviderAdapter {
   isAvailable(): boolean                       // credential check, §6
   send(model: string, adaptedRequest): RawResponse   // provider-specific call
   sendStreaming(model, adaptedRequest, onText): RawResponse   // optional, §4.2; default: send, then onText(whole text)
+  defaultEmbeddingModel(): string | null       // optional, §3.2; null = no embeddings
+  embed(model, texts, dimensions): EmbeddingResponse fragment   // optional, §3.2
   sendStreamingAsync(model, adaptedRequest, onText): future<RawResponse>   // optional, §4.2; default: sendStreaming off the caller's thread
   normalize(rawResponse): Response fragments   // maps provider response → unified Response shape
 }
