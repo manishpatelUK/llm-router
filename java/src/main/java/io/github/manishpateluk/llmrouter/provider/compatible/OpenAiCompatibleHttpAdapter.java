@@ -19,6 +19,7 @@ import tools.jackson.databind.node.ObjectNode;
 import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
 import io.github.manishpateluk.llmrouter.model.Attachment;
+import io.github.manishpateluk.llmrouter.model.Citation;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.Role;
@@ -310,8 +311,50 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
                         .reasoningTokens(0)
                         .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                         .build())
+                .citations(parseCitations(root))
                 .original(root)
                 .build();
+    }
+
+    /**
+     * Reads the top-level {@code citations} (source URLs, in the order the answer's {@code [n]}
+     * markers number them) and {@code search_results} (title, url, snippet per source) that
+     * Perplexity adds to its responses. The result follows {@code citations}' order, enriched
+     * from the matching search result; with only {@code search_results}, their order is used.
+     * Providers that send neither get an empty list.
+     */
+    private static List<Citation> parseCitations(JsonNode body) {
+        Map<String, JsonNode> searchResultsByUrl = new LinkedHashMap<>();
+        for (JsonNode result : body.path("search_results")) {
+            String url = result.path("url").asText("");
+            if (!url.isEmpty()) {
+                searchResultsByUrl.putIfAbsent(url, result);
+            }
+        }
+        List<String> urls = new ArrayList<>();
+        for (JsonNode url : body.path("citations")) {
+            if (!url.asText("").isEmpty()) {
+                urls.add(url.asText());
+            }
+        }
+        if (urls.isEmpty()) {
+            urls.addAll(searchResultsByUrl.keySet());
+        }
+        List<Citation> citations = new ArrayList<>();
+        for (String url : urls) {
+            JsonNode result = searchResultsByUrl.get(url);
+            citations.add(Citation.builder()
+                    .url(url)
+                    .title(result == null ? null : nonBlank(result.path("title")))
+                    .snippet(result == null ? null : nonBlank(result.path("snippet")))
+                    .build());
+        }
+        return citations;
+    }
+
+    private static String nonBlank(JsonNode text) {
+        String value = text.asText("");
+        return value.isBlank() ? null : value;
     }
 
     /**
@@ -327,6 +370,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         private final Map<Integer, StreamedToolCall> toolCalls = new TreeMap<>();
         private final ArrayNode chunks = MAPPER.createArrayNode();
         private JsonNode usage = MAPPER.missingNode();
+        private List<Citation> citations = List.of();
 
         StreamAccumulator(Consumer<String> onText) {
             this.onText = onText;
@@ -347,6 +391,10 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
             }
             if (chunk.path("usage").isObject()) {
                 usage = chunk.path("usage");
+            }
+            List<Citation> chunkCitations = parseCitations(chunk);
+            if (!chunkCitations.isEmpty()) {
+                citations = chunkCitations; // Perplexity repeats them on chunks; the latest list is the complete one
             }
             JsonNode delta = chunk.path("choices").path(0).path("delta");
             String text = delta.path("content").asText("");
@@ -370,6 +418,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
                             .reasoningTokens(0)
                             .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                             .build())
+                    .citations(citations)
                     .original(chunks)
                     .build();
         }

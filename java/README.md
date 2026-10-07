@@ -190,6 +190,27 @@ router.completeStreamingAsync(request, delta -> ui.appendLater(delta))
 
 See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
+**Citations.** When a provider reports the sources its answer draws on, they come back on the response, in a provider-neutral shape. Today that's Perplexity, whose models search the web as they answer:
+
+```java
+import io.github.manishpateluk.llmrouter.model.Citation;
+
+RouterConfig perplexityConfig = RouterConfig.builder()
+    .route(List.of(RouteEntry.of(Provider.PERPLEXITY)))
+    .build();
+
+Response response = router.complete("Who won the 2026 World Cup?", perplexityConfig);
+for (int i = 0; i < response.getCitations().size(); i++) {
+    Citation source = response.getCitations().get(i);
+    System.out.println("[" + (i + 1) + "] " + source.getTitle() + " " + source.getUrl());
+}
+```
+
+- **Numbering.** The list keeps the provider's order, so a `[1]` marker in `getContent()` refers to `getCitations().get(0)`.
+- **Fields.** `getUrl()` is always set. `getTitle()` and `getSnippet()` are `null` when the provider doesn't give them.
+- **Streaming.** Streamed calls fill `getCitations()` too. Citations arrive on the returned `Response`, not through the listener.
+- **Other providers.** The list is empty for providers that don't report citations.
+
 **Embeddings**, for semantic search:
 
 ```java

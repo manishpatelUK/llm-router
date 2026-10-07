@@ -30,6 +30,7 @@ import io.github.manishpateluk.llmrouter.error.InvalidRequestException;
 import io.github.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
 import io.github.manishpateluk.llmrouter.error.RouterExhaustedException;
 import io.github.manishpateluk.llmrouter.model.AttemptOutcome;
+import io.github.manishpateluk.llmrouter.model.Citation;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.ToolDefinition;
@@ -89,6 +90,19 @@ class LlmRouterTest {
         assertThat(response.getProviderUsed()).isEqualTo(Provider.ANTHROPIC);
         assertThat(response.getModelUsed()).isEqualTo("claude-opus-5-5");
         assertThat(response.getAttempts()).isEmpty();
+    }
+
+    @Test
+    void citationsFromTheAdapterReachTheCaller() {
+        stubId(anthropic, Provider.PERPLEXITY);
+        when(anthropic.isAvailable()).thenReturn(true);
+        List<Citation> citations = List.of(Citation.builder().url("https://example.org/a").title("A").build());
+        when(anthropic.send(eq("sonar"), any())).thenReturn(fragment("answer [1]").toBuilder().citations(citations).build());
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder().route(List.of(RouteEntry.of(Provider.PERPLEXITY, "sonar"))).build();
+
+        assertThat(router.complete("q", config).getCitations()).isEqualTo(citations);
     }
 
     @Test

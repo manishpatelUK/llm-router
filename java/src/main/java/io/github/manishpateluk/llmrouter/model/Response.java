@@ -44,6 +44,15 @@ public class Response {
     List<GeneratedFile> generatedFiles = List.of();
 
     /**
+     * Sources the answer draws on, when the provider reports them (today: Perplexity) — see
+     * {@code LIBRARY_SPEC.md} §3. In the provider's order: where {@code content} carries numbered
+     * markers such as {@code [1]}, marker {@code [n]} refers to {@code citations.get(n - 1)}.
+     * Empty when the provider reports none.
+     */
+    @Builder.Default
+    List<Citation> citations = List.of();
+
+    /**
      * The raw original output from the provider, for convenience — the actual SDK response
      * object (e.g. Anthropic's {@code Message}, OpenAI's {@code ChatCompletion}) or a parsed
      * JSON body for the raw-HTTP adapters, so a caller who knows the provider can cast to it.

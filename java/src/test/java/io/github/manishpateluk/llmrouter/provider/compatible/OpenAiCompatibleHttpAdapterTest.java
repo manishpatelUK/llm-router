@@ -2,6 +2,7 @@ package io.github.manishpateluk.llmrouter.provider.compatible;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -14,6 +15,7 @@ import java.util.function.Consumer;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import io.github.manishpateluk.llmrouter.model.Attachment;
+import io.github.manishpateluk.llmrouter.model.Citation;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.ToolDefinition;
@@ -204,6 +206,76 @@ class OpenAiCompatibleHttpAdapterTest {
         assertThat(ok.statusCode()).isEqualTo(200);
         assertThat(error.statusCode()).isEqualTo(500);
         assertThat(error.body()).isEqualTo("boom");
+    }
+
+    // ---- citations (Perplexity) ----
+
+    @Test
+    void perplexityCitationsFollowTheMarkerOrderAndAreEnrichedFromSearchResults() {
+        when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
+                {
+                  "choices": [{"message": {"content": "Paris is the capital [1], on the Seine [2]."}}],
+                  "citations": ["https://example.org/paris", "https://example.org/seine"],
+                  "search_results": [
+                    {"title": "The Seine", "url": "https://example.org/seine", "date": "2026-01-02", "snippet": "A river in France."},
+                    {"title": "Unrelated", "url": "https://example.org/other"},
+                    {"title": "Paris", "url": "https://example.org/paris", "date": "2025-12-01"}
+                  ],
+                  "usage": {"prompt_tokens": 5, "completion_tokens": 9}
+                }
+                """));
+
+        Response response = new PerplexityAdapter("key", transport).send("sonar", Request.builder().prompt("Capital of France?").build());
+
+        assertThat(response.getCitations()).extracting(Citation::getUrl)
+                .containsExactly("https://example.org/paris", "https://example.org/seine");
+        assertThat(response.getCitations().get(0).getTitle()).isEqualTo("Paris");
+        assertThat(response.getCitations().get(0).getSnippet()).isNull();
+        assertThat(response.getCitations().get(1).getTitle()).isEqualTo("The Seine");
+        assertThat(response.getCitations().get(1).getSnippet()).isEqualTo("A river in France.");
+    }
+
+    @Test
+    void searchResultsAloneBecomeCitationsInTheirOwnOrder() {
+        when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
+                {"choices": [{"message": {"content": "ok"}}],
+                 "search_results": [{"title": "A", "url": "https://a.example"}, {"title": "B", "url": "https://b.example"}]}
+                """));
+
+        Response response = new PerplexityAdapter("key", transport).send("sonar", Request.builder().prompt("q").build());
+
+        assertThat(response.getCitations()).extracting(Citation::getUrl, Citation::getTitle)
+                .containsExactly(tuple("https://a.example", "A"), tuple("https://b.example", "B"));
+    }
+
+    @Test
+    void aResponseWithoutCitationsHasAnEmptyList() throws Exception {
+        when(transport.send(any())).thenReturn(textResponse("plain answer", 1, 1));
+
+        Response response = new NvidiaAdapter("key", transport).send("some-model", Request.builder().prompt("q").build());
+
+        assertThat(response.getCitations()).isEmpty();
+    }
+
+    @Test
+    void streamedCitationsAreTakenFromTheLatestChunkThatCarriesThem() {
+        when(transport.sendStreaming(any(), any())).thenAnswer(invocation -> {
+            Consumer<String> onLine = invocation.getArgument(1);
+            onLine.accept("data: {\"choices\":[{\"delta\":{\"content\":\"Paris [1]\"}}],\"citations\":[\"https://example.org/paris\"]}");
+            onLine.accept("data: {\"choices\":[{\"delta\":{\"content\":\" and the Seine [2].\"}}],"
+                    + "\"citations\":[\"https://example.org/paris\",\"https://example.org/seine\"],"
+                    + "\"search_results\":[{\"title\":\"The Seine\",\"url\":\"https://example.org/seine\"}]}");
+            onLine.accept("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}");
+            onLine.accept("data: [DONE]");
+            return new HttpResponseRecord(200, "");
+        });
+
+        Response response = new PerplexityAdapter("key", transport).sendStreaming("sonar", Request.builder().prompt("q").build(), text -> { });
+
+        assertThat(response.getContent()).isEqualTo("Paris [1] and the Seine [2].");
+        assertThat(response.getCitations()).extracting(Citation::getUrl)
+                .containsExactly("https://example.org/paris", "https://example.org/seine");
+        assertThat(response.getCitations().get(1).getTitle()).isEqualTo("The Seine");
     }
 
     @Test

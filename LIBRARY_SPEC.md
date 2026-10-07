@@ -115,7 +115,14 @@ Response {
   droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
   attempts: AttemptRecord[]            // one entry per candidate tried before success (empty if first candidate succeeded)
   generatedFiles: GeneratedFile[]?     // files the model produced (e.g. via code execution or image generation), if any
+  citations: Citation[]                // sources the answer draws on, when the provider reports them; empty otherwise
   original: {}                         // the raw original output from the provide, for convenience
+}
+
+Citation {
+  url: string                          // always present
+  title: string?                       // when the provider gives one
+  snippet: string?                     // a short excerpt from the source, when the provider gives one
 }
 
 AttemptRecord {
@@ -133,6 +140,8 @@ GeneratedFile {
                                         // of inline bytes — exactly one of data/url is populated
 }
 ```
+
+**Citations.** Adapters map their provider's own citation format onto `Citation`, so callers never parse provider-specific fields. `citations` keeps the provider's order: where `content` carries numbered markers such as `[1]`, marker `[n]` refers to the `n`th citation. For Perplexity, the list follows the response's top-level `citations` (URLs, in marker order), each enriched with the `title` and `snippet` of the matching entry in `search_results`; a response with only `search_results` uses their order. In a streamed call (§4.2) Perplexity repeats these fields on its chunks, so the latest chunk carrying them gives the complete list. Like tool calls, citations arrive on the returned `Response`, not through the stream listener.
 
 ---
 
@@ -562,12 +571,12 @@ ProviderToolResult {
   type: string                         // canonical ID, e.g. "webSearch"
   input: object?                       // what the model asked for, e.g. { query } or { code }, when the provider exposes it
   output: string?                      // text output, e.g. stdout for codeExecution, when provided
-  citations: Citation[]?               // { url, title?, citedText? } for search/fetch results the answer relies on
+  citations: Citation[]?               // §3's Citation, for search/fetch results the answer relies on
   error: string?                       // provider-reported failure of this tool run (the overall response can still succeed)
 }
 ```
 
-- `content` stays the model's final answer, with the model's own inline references left as-is. `citations` gives callers a structured, provider-neutral list without having to parse provider-specific annotation formats.
+- `content` stays the model's final answer, with the model's own inline references left as-is. `citations` gives callers a structured, provider-neutral list without having to parse provider-specific annotation formats. The `Citation` shape already exists on `Response` (§3), filled today from Perplexity's built-in search; provider-run search tools would reuse it, both here and on `Response.citations`.
 - Files produced by `codeExecution` keep coming back through the existing `generatedFiles` (§3), which already anticipates this.
 - `original` still carries the raw provider blocks for anything the neutral shape doesn't capture.
 - **Cost.** Hosted tools are often billed per use on top of tokens. `Usage` gains `providerToolUses: map<type, int>`, and the capability table a per-tool unit price, so `estimatedCostUsd` stays meaningful.
