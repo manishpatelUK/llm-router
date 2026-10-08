@@ -187,9 +187,11 @@ public final class OpenAiAdapter implements ProviderAdapter {
     }
 
     private ChatCompletionCreateParams toParams(String model, Request request) {
+        // max_completion_tokens, not the deprecated max_tokens: reasoning models (GPT-6, o-series)
+        // reject max_tokens with a 400, while every current chat model accepts max_completion_tokens.
         ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                 .model(model)
-                .maxTokens(resolveMaxTokens(model));
+                .maxCompletionTokens(resolveMaxTokens(model));
 
         if (request.getTemperature() != null) {
             builder.temperature(request.getTemperature());
