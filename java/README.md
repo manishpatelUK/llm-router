@@ -10,7 +10,7 @@ Include this in your `pom.xml`:
 <dependency>
   <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
-  <version>1.0.5</version>
+  <version>1.0.6</version>
 </dependency>
 ```
 
@@ -249,7 +249,7 @@ This README only covers installing and calling the library; credential setup liv
 
 ## Developer Notes on push (because I'm too stupid to remember these steps)
 
-1. Bump the version in java/pom.xml off 1.0.5-SNAPSHOT to a real release, e.g. 1.0.5
+1. Bump the version in java/pom.xml off 1.0.6-SNAPSHOT to a real release, e.g. 1.0.6
 2. From java/: mvn clean deploy -Prelease
 3. It'll prompt for your GPG passphrase, sign everything, and upload the bundle to Central
 4. Go to the Central Portal → Deployments, find it, review the contents, and click Publish — it stays private until you do this
