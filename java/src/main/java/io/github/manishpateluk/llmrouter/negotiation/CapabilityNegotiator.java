@@ -64,7 +64,12 @@ public final class CapabilityNegotiator {
         boolean structuredOutputViaPromptFallback = false;
 
         if (request.getResponseSchema() != null && !(model.isSupportsStructuredOutput() && schemaSupportedNatively)) {
-            structuredOutputViaPromptFallback = withoutNativeSchema(request, strategy, adapted, droppedFeatures);
+            adapted.responseSchema(null);
+            String fallbackInstructions = promptFallbackInstructions(request, strategy, droppedFeatures);
+            if (fallbackInstructions != null) {
+                adapted.systemInstructions(fallbackInstructions);
+                structuredOutputViaPromptFallback = true;
+            }
         }
 
         if (!request.getTools().isEmpty() && !model.isSupportsTools()) {
@@ -119,8 +124,15 @@ public final class CapabilityNegotiator {
         Objects.requireNonNull(strategy, "strategy must not be null");
         List<String> droppedFeatures = new ArrayList<>();
         Request.RequestBuilder adapted = request.toBuilder().temperature(temperature).topP(topP);
-        boolean viaPromptFallback = request.getResponseSchema() != null && !schemaSupportedNatively
-                && withoutNativeSchema(request, strategy, adapted, droppedFeatures);
+        boolean viaPromptFallback = false;
+        if (request.getResponseSchema() != null && !schemaSupportedNatively) {
+            adapted.responseSchema(null);
+            String fallbackInstructions = promptFallbackInstructions(request, strategy, droppedFeatures);
+            if (fallbackInstructions != null) {
+                adapted.systemInstructions(fallbackInstructions);
+                viaPromptFallback = true;
+            }
+        }
         return NegotiationResult.builder()
                 .adaptedRequest(adapted.build())
                 .droppedFeatures(List.copyOf(droppedFeatures))
@@ -129,19 +141,19 @@ public final class CapabilityNegotiator {
     }
 
     /**
-     * A {@code responseSchema} the model can't take natively: dropped under {@code NATIVE}, else
-     * put into the system instructions. Returns whether it went into the instructions.
+     * A {@code responseSchema} the model can't take natively: dropped under {@code NATIVE}
+     * (returns {@code null}), else the system instructions with the schema put into them.
+     * Takes no {@code Request.RequestBuilder}: javadoc runs on the un-delomboked sources, where
+     * that type doesn't exist, so it must stay out of method signatures.
      */
-    private static boolean withoutNativeSchema(
-            Request request, StructuredOutputStrategy strategy, Request.RequestBuilder adapted, List<String> droppedFeatures) {
-        adapted.responseSchema(null);
+    private static String promptFallbackInstructions(
+            Request request, StructuredOutputStrategy strategy, List<String> droppedFeatures) {
         if (strategy == StructuredOutputStrategy.NATIVE) {
             droppedFeatures.add("responseSchema");
-            return false;
+            return null;
         }
         // PROMPT_FALLBACK or AUTO, with no native support: inject schema + instructions
-        adapted.systemInstructions(withPromptFallbackInstruction(request.getSystemInstructions(), request.getResponseSchema()));
-        return true;
+        return withPromptFallbackInstruction(request.getSystemInstructions(), request.getResponseSchema());
     }
 
     /**
