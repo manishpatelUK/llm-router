@@ -336,6 +336,12 @@ public final class OpenAiAdapter implements ProviderAdapter {
         return builder.build();
     }
 
+    /**
+     * The schema as given. It's sent without {@code strict}, so OpenAI accepts any JSON schema —
+     * strict mode would also need {@code additionalProperties: false} on every object and every
+     * property in {@code required}, and making optional properties required would change what the
+     * caller asked for.
+     */
     private static ResponseFormatJsonSchema.JsonSchema.Schema toJsonSchema(Map<String, Object> responseSchema) {
         ResponseFormatJsonSchema.JsonSchema.Schema.Builder builder = ResponseFormatJsonSchema.JsonSchema.Schema.builder();
         for (Map.Entry<String, Object> entry : responseSchema.entrySet()) {

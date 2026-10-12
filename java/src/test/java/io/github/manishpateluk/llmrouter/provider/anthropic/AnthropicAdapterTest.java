@@ -95,6 +95,38 @@ class AnthropicAdapterTest {
     }
 
     @Test
+    void sendsTheResponseSchemaWithAdditionalPropertiesFalseOnEveryObject() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("{}"));
+        Map<String, Object> callers = AnthropicSchemasTest.nestedSchema();
+
+        new AnthropicAdapter(client).send("claude-opus-5-5", Request.builder().prompt("Hi").responseSchema(callers).build());
+
+        Map<String, com.anthropic.core.JsonValue> sent =
+                captor.getValue().outputConfig().orElseThrow().format().orElseThrow().schema()._additionalProperties();
+        assertThat(sent.get("additionalProperties").convert(Boolean.class)).isFalse();
+        Map<Object, Object> properties = sent.get("properties").convert(Map.class);
+        assertThat((Map<Object, Object>) properties.get("address")).containsEntry("additionalProperties", false);
+        assertThat(callers).isEqualTo(AnthropicSchemasTest.nestedSchema());
+    }
+
+    @Test
+    void reportsASchemaItCantEnforceAndRefusesToSendIt() {
+        Map<String, Object> open = Map.of("type", "object", "properties",
+                Map.of("meta", Map.of("type", "object", "additionalProperties", true)));
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+
+        assertThat(adapter.responseSchemaProblem("claude-opus-5-5", open))
+                .contains("$.properties.meta.additionalProperties is true");
+        assertThat(adapter.responseSchemaProblem("claude-opus-5-5", AnthropicSchemasTest.nestedSchema())).isNull();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> adapter.send("claude-opus-5-5",
+                        Request.builder().prompt("Hi").responseSchema(open).build()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.properties.meta.additionalProperties");
+    }
+
+    @Test
     void sendIncludesTemperatureAndTopPWhenPresent() {
         when(client.messages()).thenReturn(messageService);
         ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);

@@ -391,6 +391,76 @@ class LlmRouterTest {
         assertThat(response.getStructuredOutput()).isNull();
     }
 
+    // ---- schemas an adapter can't enforce natively ----
+
+    private static final Map<String, Object> OPEN_SCHEMA = Map.of("type", "object", "additionalProperties", true);
+
+    @Test
+    void aSchemaTheAdapterCantEnforceGoesIntoThePromptUnderAuto() {
+        registerFixtureModel(true, true, false);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.responseSchemaProblem(eq("fixture-model"), any())).thenReturn("$.additionalProperties is true");
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(anthropic.send(eq("fixture-model"), captor.capture())).thenReturn(fragment("{\"anything\":1}"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .build();
+        Response response = router.complete(Request.builder().prompt("hi").responseSchema(OPEN_SCHEMA).config(config).build());
+
+        assertThat(captor.getValue().getResponseSchema()).isNull();
+        assertThat(captor.getValue().getSystemInstructions()).contains("Respond with valid JSON only", "\"additionalProperties\" : true");
+        assertThat(response.getStructuredOutput()).containsEntry("anything", 1);
+        assertThat(response.getDroppedFeatures()).isEmpty();
+    }
+
+    @Test
+    void aRequiredSchemaTheAdapterCantEnforceSkipsItWithTheReasonAndFallsBack() {
+        registerFixtureModel(true, true, false);
+        stubId(openrouter, Provider.OPENROUTER);
+        stubId(openai, Provider.OPENAI);
+        when(openrouter.isAvailable()).thenReturn(true);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openrouter.responseSchemaProblem(eq("fixture-model"), any())).thenReturn("$.additionalProperties is true");
+        ArgumentCaptor<Request> captor = ArgumentCaptor.forClass(Request.class);
+        when(openai.send(eq("gpt-6-astra"), captor.capture())).thenReturn(fragment("{}"));
+
+        LlmRouter router = new LlmRouter(List.of(openrouter, openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .structuredOutputStrategy(StructuredOutputStrategy.NATIVE)
+                .requiredFeatures(Set.of(Feature.RESPONSE_SCHEMA))
+                .build();
+        Response response = router.complete(Request.builder().prompt("hi").responseSchema(OPEN_SCHEMA).config(config).build());
+
+        verify(openrouter, never()).send(any(), any());
+        assertThat(captor.getValue().getResponseSchema()).isEqualTo(OPEN_SCHEMA);
+        assertThat(response.getAttempts()).hasSize(1);
+        assertThat(response.getAttempts().get(0).getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+        assertThat(response.getAttempts().get(0).getReason()).isEqualTo("model does not support required feature(s) "
+                + "[responseSchema]: can't enforce this responseSchema natively ($.additionalProperties is true)");
+    }
+
+    @Test
+    void underNativeASchemaTheAdapterCantEnforceIsDroppedAndReported() {
+        registerFixtureModel(true, true, false);
+        stubId(anthropic, Provider.OPENROUTER);
+        when(anthropic.isAvailable()).thenReturn(true);
+        when(anthropic.responseSchemaProblem(eq("fixture-model"), any())).thenReturn("$.additionalProperties is true");
+        when(anthropic.send(eq("fixture-model"), any())).thenReturn(fragment("plain"));
+
+        LlmRouter router = new LlmRouter(List.of(anthropic));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENROUTER, "fixture-model")))
+                .structuredOutputStrategy(StructuredOutputStrategy.NATIVE)
+                .build();
+        Response response = router.complete(Request.builder().prompt("hi").responseSchema(OPEN_SCHEMA).config(config).build());
+
+        assertThat(response.getDroppedFeatures()).containsExactly("responseSchema");
+    }
+
     @Test
     void onlyTemperatureSentToAdapterWhenSupported() {
         registerFixtureModel(false, false, false, true, true);

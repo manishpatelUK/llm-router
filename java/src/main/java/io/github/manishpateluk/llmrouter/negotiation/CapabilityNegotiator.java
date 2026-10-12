@@ -43,6 +43,18 @@ public final class CapabilityNegotiator {
      */
     public static NegotiationResult negotiate(
             ModelEntry model, Request request, StructuredOutputStrategy strategy, Double temperature, Double topP) {
+        return negotiate(model, request, strategy, temperature, topP, true);
+    }
+
+    /**
+     * {@link #negotiate(ModelEntry, Request, StructuredOutputStrategy, Double, Double)}, where
+     * {@code schemaSupportedNatively} {@code false} means the provider can't enforce this
+     * particular {@code responseSchema} natively (see {@code ProviderAdapter.responseSchemaProblem}),
+     * so it's handled as for a model without native structured output.
+     */
+    public static NegotiationResult negotiate(
+            ModelEntry model, Request request, StructuredOutputStrategy strategy, Double temperature, Double topP,
+            boolean schemaSupportedNatively) {
         Objects.requireNonNull(model, "model must not be null");
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(strategy, "strategy must not be null");
@@ -51,19 +63,8 @@ public final class CapabilityNegotiator {
         Request.RequestBuilder adapted = request.toBuilder();
         boolean structuredOutputViaPromptFallback = false;
 
-        if (request.getResponseSchema() != null) {
-            if (model.isSupportsStructuredOutput()) {
-                // sent natively — request already carries responseSchema, nothing to change
-            } else if (strategy == StructuredOutputStrategy.NATIVE) {
-                droppedFeatures.add("responseSchema");
-                adapted.responseSchema(null);
-            } else {
-                // PROMPT_FALLBACK or AUTO, with no native support: inject schema + instructions
-                adapted.systemInstructions(withPromptFallbackInstruction(
-                        request.getSystemInstructions(), request.getResponseSchema()));
-                adapted.responseSchema(null);
-                structuredOutputViaPromptFallback = true;
-            }
+        if (request.getResponseSchema() != null && !(model.isSupportsStructuredOutput() && schemaSupportedNatively)) {
+            structuredOutputViaPromptFallback = withoutNativeSchema(request, strategy, adapted, droppedFeatures);
         }
 
         if (!request.getTools().isEmpty() && !model.isSupportsTools()) {
@@ -105,6 +106,45 @@ public final class CapabilityNegotiator {
     }
 
     /**
+     * Negotiation for a model missing from the capability table: with no data to check against,
+     * everything is sent optimistically (temperature and topP included), except a
+     * {@code responseSchema} the provider is known not to support natively
+     * ({@code schemaSupportedNatively} {@code false}), which is handled as for a model without
+     * native structured output.
+     */
+    public static NegotiationResult negotiateUnknownModel(
+            Request request, StructuredOutputStrategy strategy, Double temperature, Double topP,
+            boolean schemaSupportedNatively) {
+        Objects.requireNonNull(request, "request must not be null");
+        Objects.requireNonNull(strategy, "strategy must not be null");
+        List<String> droppedFeatures = new ArrayList<>();
+        Request.RequestBuilder adapted = request.toBuilder().temperature(temperature).topP(topP);
+        boolean viaPromptFallback = request.getResponseSchema() != null && !schemaSupportedNatively
+                && withoutNativeSchema(request, strategy, adapted, droppedFeatures);
+        return NegotiationResult.builder()
+                .adaptedRequest(adapted.build())
+                .droppedFeatures(List.copyOf(droppedFeatures))
+                .structuredOutputViaPromptFallback(viaPromptFallback)
+                .build();
+    }
+
+    /**
+     * A {@code responseSchema} the model can't take natively: dropped under {@code NATIVE}, else
+     * put into the system instructions. Returns whether it went into the instructions.
+     */
+    private static boolean withoutNativeSchema(
+            Request request, StructuredOutputStrategy strategy, Request.RequestBuilder adapted, List<String> droppedFeatures) {
+        adapted.responseSchema(null);
+        if (strategy == StructuredOutputStrategy.NATIVE) {
+            droppedFeatures.add("responseSchema");
+            return false;
+        }
+        // PROMPT_FALLBACK or AUTO, with no native support: inject schema + instructions
+        adapted.systemInstructions(withPromptFallbackInstruction(request.getSystemInstructions(), request.getResponseSchema()));
+        return true;
+    }
+
+    /**
      * The members of {@code required} that negotiating {@code request} against {@code model}
      * would drop (§5.4), in {@link Feature} declaration order — empty if the model can honor
      * every required feature the request actually uses. Defined in terms of {@link #negotiate}
@@ -114,11 +154,18 @@ public final class CapabilityNegotiator {
      */
     public static List<Feature> unmetRequiredFeatures(
             ModelEntry model, Request request, StructuredOutputStrategy strategy, Set<Feature> required) {
+        return unmetRequiredFeatures(model, request, strategy, required, true);
+    }
+
+    /** {@link #unmetRequiredFeatures(ModelEntry, Request, StructuredOutputStrategy, Set)} with {@code schemaSupportedNatively} as in {@link #negotiate}. */
+    public static List<Feature> unmetRequiredFeatures(
+            ModelEntry model, Request request, StructuredOutputStrategy strategy, Set<Feature> required,
+            boolean schemaSupportedNatively) {
         Objects.requireNonNull(required, "required must not be null");
         if (required.isEmpty()) {
             return List.of();
         }
-        List<String> dropped = negotiate(model, request, strategy).getDroppedFeatures();
+        List<String> dropped = negotiate(model, request, strategy, null, null, schemaSupportedNatively).getDroppedFeatures();
         return Arrays.stream(Feature.values())
                 .filter(required::contains)
                 .filter(feature -> dropped.contains(feature.wireValue()))

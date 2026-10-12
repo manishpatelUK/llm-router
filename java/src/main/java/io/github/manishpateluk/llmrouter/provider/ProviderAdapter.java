@@ -1,6 +1,7 @@
 package io.github.manishpateluk.llmrouter.provider;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,6 +62,21 @@ public interface ProviderAdapter {
      */
     default CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         return CompletableFuture.supplyAsync(() -> send(model, adaptedRequest), DEFAULT_ASYNC_EXECUTOR);
+    }
+
+    /**
+     * Why this adapter can't enforce {@code responseSchema} natively on {@code model} — the
+     * provider's structured-output mode rejects something the schema uses — or {@code null} if it
+     * can (the default). The router asks before each attempt that would send a schema natively, and
+     * when there's a problem treats the candidate as lacking native structured output for that
+     * request: per {@code structuredOutputStrategy} the schema goes into the prompt instead
+     * ({@code AUTO}, {@code PROMPT_FALLBACK}) or is dropped and reported in {@code droppedFeatures}
+     * ({@code NATIVE}), and if {@code RESPONSE_SCHEMA} is a required feature the candidate is skipped
+     * with this reason — see {@code LIBRARY_SPEC.md} §4. Adapters that rewrite schemas to fit their
+     * provider (e.g. adding {@code additionalProperties: false}) report only what they can't rewrite.
+     */
+    default String responseSchemaProblem(String model, Map<String, Object> responseSchema) {
+        return null;
     }
 
     /**

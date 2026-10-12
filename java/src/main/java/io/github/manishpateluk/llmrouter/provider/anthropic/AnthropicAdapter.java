@@ -109,6 +109,12 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return client != null;
     }
 
+    /** What {@link AnthropicSchemas} can't turn into a schema Anthropic's structured outputs accept, if anything. */
+    @Override
+    public String responseSchemaProblem(String model, Map<String, Object> responseSchema) {
+        return AnthropicSchemas.convert(responseSchema).problem();
+    }
+
     @Override
     public Response send(String model, Request adaptedRequest) {
         requireAvailable();
@@ -294,9 +300,20 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return schema.build();
     }
 
+    /**
+     * The request's schema as Anthropic accepts it — see {@link AnthropicSchemas}: a copy with
+     * {@code additionalProperties: false} on every object, and unenforceable constraints moved into
+     * descriptions. A schema it can't express fails here, naming the path; the router never sends
+     * one (see {@link #responseSchemaProblem}), so this only happens when the adapter is called directly.
+     */
     private static JsonOutputFormat.Schema toOutputSchema(Map<String, Object> responseSchema) {
+        AnthropicSchemas.Conversion conversion = AnthropicSchemas.convert(responseSchema);
+        if (conversion.problem() != null) {
+            throw new IllegalArgumentException("responseSchema can't be enforced by Anthropic structured outputs: "
+                    + conversion.problem());
+        }
         JsonOutputFormat.Schema.Builder schema = JsonOutputFormat.Schema.builder();
-        for (Map.Entry<String, Object> entry : responseSchema.entrySet()) {
+        for (Map.Entry<String, Object> entry : conversion.schema().entrySet()) {
             schema.putAdditionalProperty(entry.getKey(), JsonValue.from(entry.getValue()));
         }
         return schema.build();

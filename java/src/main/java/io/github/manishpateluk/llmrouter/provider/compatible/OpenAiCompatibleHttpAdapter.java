@@ -278,6 +278,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         return toolsNode;
     }
 
+    /** The schema as given, without {@code strict} — see {@code OpenAiAdapter.toJsonSchema} for why. */
     private ObjectNode buildResponseFormat(Map<String, Object> responseSchema) {
         ObjectNode format = MAPPER.createObjectNode();
         format.put("type", "json_schema");

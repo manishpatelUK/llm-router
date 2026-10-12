@@ -20,6 +20,7 @@ import io.github.manishpateluk.llmrouter.capability.ModelEntry;
 import io.github.manishpateluk.llmrouter.config.Feature;
 import io.github.manishpateluk.llmrouter.config.RouteEntry;
 import io.github.manishpateluk.llmrouter.config.RouterConfig;
+import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import io.github.manishpateluk.llmrouter.error.InvalidConfigException;
 import io.github.manishpateluk.llmrouter.error.InvalidRequestException;
 import io.github.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
@@ -363,13 +364,14 @@ public final class LlmRouter {
         for (RouteEntry candidate : candidates) {
             ProviderAdapter adapter = adapters.get(candidate.getProvider());
             ModelEntry modelEntry = findModel(candidate);
-            String skipReason = skipReason(adapter, candidate, modelEntry, request, config);
+            String schemaProblem = schemaProblem(adapter, candidate, request);
+            String skipReason = skipReason(adapter, candidate, modelEntry, request, config, schemaProblem);
             if (skipReason != null) {
                 attempts.add(recordSkip(candidate, skipReason));
                 continue;
             }
 
-            NegotiationResult negotiation = negotiate(modelEntry, request, config);
+            NegotiationResult negotiation = negotiate(candidate, modelEntry, request, config, schemaProblem);
 
             try {
                 Request toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
@@ -460,13 +462,14 @@ public final class LlmRouter {
         ProviderAdapter adapter = adapters.get(candidate.getProvider());
         ModelEntry modelEntry = findModel(candidate);
         RouterConfig config = resolveConfig(request);
-        String skipReason = skipReason(adapter, candidate, modelEntry, request, config);
+        String schemaProblem = schemaProblem(adapter, candidate, request);
+        String skipReason = skipReason(adapter, candidate, modelEntry, request, config, schemaProblem);
         if (skipReason != null) {
             attempts.add(recordSkip(candidate, skipReason));
             return attemptAsync(request, candidates, index + 1, attempts, sender);
         }
 
-        NegotiationResult negotiation = negotiate(modelEntry, request, config);
+        NegotiationResult negotiation = negotiate(candidate, modelEntry, request, config, schemaProblem);
 
         Request toSend;
         try {
@@ -521,12 +524,15 @@ public final class LlmRouter {
 
     /**
      * Why {@code candidate} must be skipped without being attempted, or {@code null} if it should
-     * be tried: no credentials (§5.1), or it can't honor one of {@code requiredFeatures} (§5.4).
-     * A model missing from the capability table has no data to check against, so — consistent
-     * with how negotiation treats it — it's tried optimistically rather than skipped.
+     * be tried: no credentials (§5.1), or it can't honor one of {@code requiredFeatures} (§5.4) —
+     * including a required {@code responseSchema} its adapter can't enforce natively
+     * ({@code schemaProblem}) when there's no prompt fallback. A model missing from the capability
+     * table has no data to check against, so — consistent with how negotiation treats it — it's
+     * otherwise tried optimistically rather than skipped.
      */
     private static String skipReason(
-            ProviderAdapter adapter, RouteEntry candidate, ModelEntry modelEntry, Request request, RouterConfig config) {
+            ProviderAdapter adapter, RouteEntry candidate, ModelEntry modelEntry, Request request, RouterConfig config,
+            String schemaProblem) {
         if (adapter == null || !adapter.isAvailable()) {
             return "no API key detected";
         }
@@ -535,13 +541,31 @@ public final class LlmRouter {
             return "no " + candidate.getProvider() + " model supports required feature(s) "
                     + requiredFeaturesInUse(request, config);
         }
+        List<Feature> unmet;
         if (modelEntry != null) {
-            List<Feature> unmet = unmetRequiredFeatures(modelEntry, request, config);
-            if (!unmet.isEmpty()) {
-                return "model does not support required feature(s) " + unmet;
-            }
+            unmet = CapabilityNegotiator.unmetRequiredFeatures(modelEntry, request, config.getStructuredOutputStrategy(),
+                    config.getRequiredFeatures(), schemaProblem == null);
+        } else {
+            unmet = schemaProblem != null && config.getRequiredFeatures().contains(Feature.RESPONSE_SCHEMA)
+                    && config.getStructuredOutputStrategy() == StructuredOutputStrategy.NATIVE
+                    ? List.of(Feature.RESPONSE_SCHEMA)
+                    : List.of();
         }
-        return null;
+        if (unmet.isEmpty()) {
+            return null;
+        }
+        String reason = "model does not support required feature(s) " + unmet;
+        return schemaProblem != null && unmet.contains(Feature.RESPONSE_SCHEMA)
+                ? reason + ": can't enforce this responseSchema natively (" + schemaProblem + ")"
+                : reason;
+    }
+
+    /** Why {@code candidate}'s adapter can't enforce the request's {@code responseSchema} natively, or {@code null}. */
+    private static String schemaProblem(ProviderAdapter adapter, RouteEntry candidate, Request request) {
+        if (adapter == null || request.getResponseSchema() == null) {
+            return null;
+        }
+        return adapter.responseSchemaProblem(candidate.getModel(), request.getResponseSchema());
     }
 
     private static List<Feature> unmetRequiredFeatures(ModelEntry modelEntry, Request request, RouterConfig config) {
@@ -561,22 +585,21 @@ public final class LlmRouter {
                 .toList();
     }
 
-    private NegotiationResult negotiate(ModelEntry modelEntry, Request request, RouterConfig config) {
+    private NegotiationResult negotiate(
+            RouteEntry candidate, ModelEntry modelEntry, Request request, RouterConfig config, String schemaProblem) {
+        if (schemaProblem != null) {
+            log.warn("{}/{} can't enforce this responseSchema natively ({}); {}", candidate.getProvider(), candidate.getModel(),
+                    schemaProblem, config.getStructuredOutputStrategy() == StructuredOutputStrategy.NATIVE
+                            ? "dropping it" : "putting it in the prompt instead");
+        }
         if (modelEntry == null) {
             // Unknown model (not in the capability table) — nothing to negotiate against; send as-is,
             // optimistically forwarding temperature/topP since there's no capability data to check them against.
-            Request adapted = request.toBuilder()
-                    .temperature(config.getTemperature())
-                    .topP(config.getTopP())
-                    .build();
-            return NegotiationResult.builder()
-                    .adaptedRequest(adapted)
-                    .droppedFeatures(List.of())
-                    .structuredOutputViaPromptFallback(false)
-                    .build();
+            return CapabilityNegotiator.negotiateUnknownModel(request, config.getStructuredOutputStrategy(),
+                    config.getTemperature(), config.getTopP(), schemaProblem == null);
         }
-        NegotiationResult result = CapabilityNegotiator.negotiate(
-                modelEntry, request, config.getStructuredOutputStrategy(), config.getTemperature(), config.getTopP());
+        NegotiationResult result = CapabilityNegotiator.negotiate(modelEntry, request, config.getStructuredOutputStrategy(),
+                config.getTemperature(), config.getTopP(), schemaProblem == null);
         if (!result.getDroppedFeatures().isEmpty()) {
             log.warn("Dropped features {} for {}/{} due to capability mismatch",
                     result.getDroppedFeatures(), modelEntry.getProvider(), modelEntry.getModel());

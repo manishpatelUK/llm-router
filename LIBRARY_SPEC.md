@@ -166,6 +166,17 @@ Every "dropped" outcome in this table becomes a **skip** instead when the featur
 
 This negotiation happens **per attempt**, not once — if the router falls back from a model that supports structured output to one that doesn't, the second attempt correctly drops it and reports that in `droppedFeatures`/`attempts`.
 
+**Schemas a provider can't enforce natively.** Supporting structured output doesn't mean supporting every JSON schema. Providers with strict schema compilers accept only a subset. Adapters therefore rewrite what they safely can, and report the rest through `responseSchemaProblem` (§8.1). Before each attempt that would send a schema natively, the router asks the candidate's adapter. If the adapter reports a problem, that candidate is treated as **not supporting `responseSchema` for this request**: the schema goes into the prompt instead under `"auto"`/`"promptFallback"`, or it's dropped and recorded under `"native"`. If `responseSchema` is in `requiredFeatures` (with `"native"`), the candidate is skipped, and the attempt's `reason` quotes the problem. The router logs a `WARN` naming the provider, model and problem. A schema is never sent in a form that silently changes what the caller asked for.
+
+Current adapters:
+
+- **Anthropic** compiles schemas strictly and returns 400 otherwise. The adapter sends a deep copy of the schema, never the caller's map, changed as follows:
+  - **Added:** `additionalProperties: false` on every object node that doesn't set it. This covers any depth: under `properties`, `items`, `anyOf`/`allOf`, `$defs`/`definitions`, and nodes whose `type` list includes `"object"`.
+  - **Relaxed:** constraints Anthropic can't enforce (`minimum`, `maximum`, `exclusiveMinimum`/`exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `minItems` above 1, `maxItems`, `uniqueItems`, `minProperties`/`maxProperties`, and `format`s other than `date-time`, `time`, `date`, `duration`, `email`, `hostname`, `uri`, `ipv4`, `ipv6`, `uuid`) are removed and appended to that node's `description` (e.g. `{minimum: 18}`), as Anthropic's own SDKs do. The model still sees them, but they aren't enforced.
+  - **Reported as a problem** (with the JSON path, e.g. `$.properties.meta.additionalProperties is true`): `additionalProperties` set to `true` or to a schema. Forcing these to `false` would turn a free-form map into an always-empty object.
+  - **Also reported:** recursive or external `$ref`s; `allOf` containing a `$ref`; enums of objects or arrays; tuple `items`/`prefixItems`; `oneOf`, `not`, `if`/`then`/`else`, `patternProperties`, `propertyNames`, `dependentSchemas`/`dependencies`, `contains`, `unevaluatedProperties`/`unevaluatedItems`. So are more than 24 optional properties or 16 union-typed properties (Anthropic's per-request limits).
+- **OpenAI** (and the OpenAI-compatible adapters) send the schema unchanged as a non-strict `json_schema`, which accepts any JSON schema, so they report no problems. Strict mode isn't used: it would need every property listed in `required`, which changes which fields are optional.
+
 `droppedFeatures` entries must use the exact canonical values in §12.7 (`"responseSchema"`, `"tools"`, `"attachments"`) — not a paraphrase or a differently-cased variant — so calling code can reliably branch on them regardless of which language implementation produced the response.
 
 ### 4.1 Request interceptor (optional last-chance hook)
@@ -401,6 +412,7 @@ ProviderAdapter {
   defaultEmbeddingModel(): string | null       // optional, §3.2; null = no embeddings
   embed(model, texts, dimensions): EmbeddingResponse fragment   // optional, §3.2
   sendStreamingAsync(model, adaptedRequest, onText): future<RawResponse>   // optional, §4.2; default: sendStreaming off the caller's thread
+  responseSchemaProblem(model, responseSchema): string | null   // optional, §4; why this schema can't be enforced natively, null = it can (default)
   normalize(rawResponse): Response fragments   // maps provider response → unified Response shape
 }
 ```
