@@ -634,6 +634,15 @@ class LlmRouterTest {
         assertThatThrownBy(() -> router.complete("   ")).isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void nonPositiveMaxOutputTokensIsRejected() {
+        LlmRouter router = new LlmRouter(List.of());
+
+        assertThatThrownBy(() -> router.complete(Request.builder().prompt("hi").maxOutputTokens(0).build()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("maxOutputTokens");
+    }
+
     // ---- requiredFeatures (§5.4) ----
 
     private static final List<ToolDefinition> ONE_TOOL = List.of(ToolDefinition.builder()

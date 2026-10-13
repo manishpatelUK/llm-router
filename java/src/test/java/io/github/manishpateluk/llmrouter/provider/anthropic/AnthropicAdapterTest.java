@@ -28,6 +28,7 @@ import com.anthropic.models.messages.Usage;
 import com.anthropic.services.async.MessageServiceAsync;
 import com.anthropic.services.blocking.FileService;
 import com.anthropic.services.blocking.MessageService;
+import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.model.Attachment;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
@@ -92,6 +93,22 @@ class AnthropicAdapterTest {
         MessageCreateParams sent = captor.getValue();
         assertThat(sent.model().toString()).isEqualTo("claude-opus-5-5");
         assertThat(sent.system()).isPresent();
+    }
+
+    @Test
+    void sendsTheModelsMaximumOutputUnlessTheRequestCapsItLower() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+        long modelMax = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-opus-5-5").orElseThrow().getMaxOutputTokens();
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5-5", Request.builder().prompt("Hi").build());
+        adapter.send("claude-opus-5-5", Request.builder().prompt("Hi").maxOutputTokens(2000).build());
+        adapter.send("claude-opus-5-5", Request.builder().prompt("Hi").maxOutputTokens(Integer.MAX_VALUE).build());
+
+        assertThat(captor.getAllValues()).extracting(MessageCreateParams::maxTokens)
+                .containsExactly(modelMax, 2000L, modelMax);
     }
 
     @Test

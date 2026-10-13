@@ -46,6 +46,8 @@ Request {
   tools: ToolDefinition[]?             // optional tool/function definitions the model may call
   attachments: Attachment[]?           // optional files to include with the prompt (documents, images, etc.)
   config: RouterConfig?                // optional; falls back to the router's default config if omitted
+  maxOutputTokens: int?                // optional cap on generated tokens (incl. reasoning tokens); null = the model's
+                                        // maxOutputTokens (§7.1); a higher value is lowered to it; must be > 0 when set
   temperature: number?                 // resolved from RouterConfig.temperature (§5) during capability negotiation (§4) — not set directly by callers
   topP: number?                        // resolved from RouterConfig.topP (§5) during capability negotiation (§4) — not set directly by callers
 }

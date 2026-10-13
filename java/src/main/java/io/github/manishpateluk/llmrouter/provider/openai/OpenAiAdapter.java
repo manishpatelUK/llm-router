@@ -191,7 +191,7 @@ public final class OpenAiAdapter implements ProviderAdapter {
         // reject max_tokens with a 400, while every current chat model accepts max_completion_tokens.
         ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                 .model(model)
-                .maxCompletionTokens(resolveMaxTokens(model));
+                .maxCompletionTokens(resolveMaxTokens(model, request));
 
         if (request.getTemperature() != null) {
             builder.temperature(request.getTemperature());
@@ -309,11 +309,13 @@ public final class OpenAiAdapter implements ProviderAdapter {
         return combined.length() == 0 ? null : combined.toString();
     }
 
-    private static long resolveMaxTokens(String model) {
-        return ModelCapabilityTable.findModel(Provider.OPENAI, model)
+    /** The model's maximum output, or the request's {@code maxOutputTokens} when that's lower. */
+    private static long resolveMaxTokens(String model, Request request) {
+        long modelMax = ModelCapabilityTable.findModel(Provider.OPENAI, model)
                 .map(ModelEntry::getMaxOutputTokens)
                 .map(Integer::longValue)
                 .orElse(DEFAULT_MAX_TOKENS);
+        return request.getMaxOutputTokens() == null ? modelMax : Math.min(modelMax, request.getMaxOutputTokens());
     }
 
     private static ChatCompletionFunctionTool toOpenAiTool(ToolDefinition tool) {

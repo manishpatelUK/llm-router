@@ -706,6 +706,10 @@ public final class LlmRouter {
         if (config.getRequiredFeatures() == null) {
             throw new InvalidConfigException("RouterConfig.requiredFeatures must not be null");
         }
+        if (request.getMaxOutputTokens() != null && request.getMaxOutputTokens() <= 0) {
+            throw new IllegalArgumentException("Request.maxOutputTokens must be positive when set, was "
+                    + request.getMaxOutputTokens());
+        }
         List<String> toolProblems = ToolDefinitionValidator.validate(request.getTools());
         if (!toolProblems.isEmpty()) {
             throw new InvalidRequestException("Invalid tool definitions:\n  - " + String.join("\n  - ", toolProblems));

@@ -72,6 +72,17 @@ class OpenAiCompatibleHttpAdapterTest {
     }
 
     @Test
+    void sendCapsMaxTokensAtTheRequestsMaxOutputTokens() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
+        adapter.send("sonar-pro", Request.builder().prompt("Hi").maxOutputTokens(300).build());
+
+        assertThat(JSON.readTree(captor.getValue().jsonBody()).path("max_tokens").asLong()).isEqualTo(300);
+    }
+
+    @Test
     void sendIncludesToolsAndResponseFormatWhenPresent() throws Exception {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));

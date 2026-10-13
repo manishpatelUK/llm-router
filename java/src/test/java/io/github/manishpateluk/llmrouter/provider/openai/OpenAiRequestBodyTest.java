@@ -102,6 +102,21 @@ class OpenAiRequestBodyTest {
         assertThat(body.path("stream").asBoolean()).isTrue();
     }
 
+    @Test
+    void aRequestsMaxOutputTokensCapsMaxCompletionTokens() {
+        contentType = "application/json";
+        responseBody = """
+                {"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"gpt-6.1-sol",
+                 "choices":[{"index":0,"message":{"role":"assistant","content":"hello","refusal":null},
+                             "finish_reason":"stop","logprobs":null}],
+                 "usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}
+                """;
+
+        router.complete(Request.builder().prompt("hi").config(config()).maxOutputTokens(1500).build());
+
+        assertThat(sentBody().path("max_completion_tokens").asLong()).isEqualTo(1500);
+    }
+
     private static void assertPinnedBody(JsonNode body) {
         long expectedMaxOutput = ModelCapabilityTable.findModel(Provider.OPENAI, MODEL).orElseThrow().getMaxOutputTokens();
         assertThat(body.path("model").asText()).isEqualTo(MODEL);

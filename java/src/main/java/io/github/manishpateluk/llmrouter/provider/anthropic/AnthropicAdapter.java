@@ -153,7 +153,7 @@ public final class AnthropicAdapter implements ProviderAdapter {
     private MessageCreateParams toParams(String model, Request request) {
         MessageCreateParams.Builder builder = MessageCreateParams.builder()
                 .model(model)
-                .maxTokens(resolveMaxTokens(model));
+                .maxTokens(resolveMaxTokens(model, request));
 
         if (request.getTemperature() != null) {
             builder.temperature(request.getTemperature());
@@ -267,11 +267,13 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return combined.length() == 0 ? null : combined.toString();
     }
 
-    private static long resolveMaxTokens(String model) {
-        return ModelCapabilityTable.findModel(Provider.ANTHROPIC, model)
+    /** The model's maximum output, or the request's {@code maxOutputTokens} when that's lower. */
+    private static long resolveMaxTokens(String model, Request request) {
+        long modelMax = ModelCapabilityTable.findModel(Provider.ANTHROPIC, model)
                 .map(ModelEntry::getMaxOutputTokens)
                 .map(Integer::longValue)
                 .orElse(DEFAULT_MAX_TOKENS);
+        return request.getMaxOutputTokens() == null ? modelMax : Math.min(modelMax, request.getMaxOutputTokens());
     }
 
     private static Tool toAnthropicTool(ToolDefinition tool) {

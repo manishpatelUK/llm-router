@@ -43,6 +43,15 @@ public class Request {
     RouterConfig config;
 
     /**
+     * Optional cap on the tokens the model may generate for this request; {@code null} means the
+     * model's own maximum ({@code ModelEntry.maxOutputTokens}). A cap above the model's maximum is
+     * lowered to it. Must be positive when set. On reasoning models the cap includes reasoning
+     * tokens. A response cut off at the cap may be incomplete — for a {@code responseSchema}
+     * request, usually with no {@code structuredOutput}.
+     */
+    Integer maxOutputTokens;
+
+    /**
      * Resolved from {@code RouterConfig.temperature} during capability negotiation (§4) —
      * {@code null} if not requested, or dropped because the candidate model doesn't support it.
      * Not intended to be set directly by callers; set {@code RouterConfig.temperature} instead.

@@ -143,7 +143,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         body.set("messages", buildMessages(request));
-        body.put("max_tokens", resolveMaxTokens(model));
+        body.put("max_tokens", resolveMaxTokens(model, request));
 
         if (request.getTemperature() != null) {
             body.put("temperature", request.getTemperature());
@@ -288,11 +288,13 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         return format;
     }
 
-    private long resolveMaxTokens(String model) {
-        return ModelCapabilityTable.findModel(id(), model)
+    /** The model's maximum output, or the request's {@code maxOutputTokens} when that's lower. */
+    private long resolveMaxTokens(String model, Request request) {
+        long modelMax = ModelCapabilityTable.findModel(id(), model)
                 .map(ModelEntry::getMaxOutputTokens)
                 .map(Integer::longValue)
                 .orElse(DEFAULT_MAX_TOKENS);
+        return request.getMaxOutputTokens() == null ? modelMax : Math.min(modelMax, request.getMaxOutputTokens());
     }
 
     private Response parseResponse(HttpResponseRecord httpResponse) {
