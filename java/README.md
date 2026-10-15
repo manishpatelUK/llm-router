@@ -10,7 +10,7 @@ Include this in your `pom.xml`:
 <dependency>
   <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
-  <version>1.0.7</version>
+  <version>1.0.9</version>
 </dependency>
 ```
 
@@ -115,6 +115,8 @@ response.getToolCalls().forEach(call ->
 The router never executes tool calls itself — it only returns what the model requested; running them is your application's job.
 
 Tool definitions are validated before any provider is called. Each `name` must match `^[a-zA-Z0-9_-]{1,64}$` and be unique within the request, and `parameters` must be a JSON Schema object with `"type": "object"`. Use `Map.of("type", "object")` for a tool that takes no arguments. A violation throws `InvalidRequestException` (code `INVALID_REQUEST`) listing every problem at once. Attachments (`Request.builder().attachments(...)`) and a `responseSchema` for structured output work the same way — see [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) §3 and §4 for the full shape and how unsupported features get dropped and reported back to you.
+
+**Large schemas on Anthropic.** Anthropic rejects a `responseSchema` whose compiled grammar is too large (roughly 60+ required fields, or 25+ arrays of strings, on Claude Sonnet 5.5) with a 400. Rather than fail over to another provider, the Anthropic adapter retries once on the same model with the schema in the prompt, as the prompt-fallback strategy does. It then checks that the reply is JSON matching the schema, and fails the attempt if it isn't. It logs a warning the first time it does this for a schema, and later calls with that schema skip the native attempt. With `StructuredOutputStrategy.NATIVE` there's no retry and the 400 fails the attempt as before.
 
 **Requiring features instead of letting them drop.** By default, if the model routed to can't support tools, a schema, or an attachment, the router drops that feature, records it in `getDroppedFeatures()`, and sends the call anyway. When your code depends on a feature — an agent loop whose control flow lives in its tools, say — mark it required so incapable candidates are skipped instead:
 
@@ -249,7 +251,7 @@ This README only covers installing and calling the library; credential setup liv
 
 ## Developer Notes on push (because I'm too stupid to remember these steps)
 
-1. Bump the version in java/pom.xml off 1.0.7-SNAPSHOT to a real release, e.g. 1.0.7
+1. Bump the version in java/pom.xml off 1.0.9-SNAPSHOT to a real release, e.g. 1.0.9
 2. From java/: mvn clean deploy -Prelease
 3. It'll prompt for your GPG passphrase, sign everything, and upload the bundle to Central
 4. Go to the Central Portal → Deployments, find it, review the contents, and click Publish — it stays private until you do this

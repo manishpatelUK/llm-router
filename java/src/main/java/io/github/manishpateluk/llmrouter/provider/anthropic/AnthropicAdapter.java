@@ -7,17 +7,28 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.SerializationFeature;
+import tools.jackson.databind.json.JsonMapper;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.JsonValue;
 import com.anthropic.core.http.StreamResponse;
+import com.anthropic.errors.AnthropicServiceException;
 import com.anthropic.helpers.MessageAccumulator;
+import com.anthropic.models.ErrorType;
 import com.anthropic.models.files.FileUploadParams;
 import com.anthropic.models.messages.Base64ImageSource;
 import com.anthropic.models.messages.Base64PdfSource;
@@ -37,12 +48,14 @@ import com.anthropic.models.messages.ToolUseBlock;
 import com.anthropic.models.messages.ToolUseBlockParam;
 import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
+import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import io.github.manishpateluk.llmrouter.model.Attachment;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.Role;
 import io.github.manishpateluk.llmrouter.model.ToolCall;
 import io.github.manishpateluk.llmrouter.model.ToolDefinition;
+import io.github.manishpateluk.llmrouter.negotiation.CapabilityNegotiator;
 import io.github.manishpateluk.llmrouter.provider.Provider;
 import io.github.manishpateluk.llmrouter.provider.ProviderAdapter;
 
@@ -80,14 +93,31 @@ import org.slf4j.LoggerFactory;
  * long time and sees a very large number of distinct attachments will grow it unboundedly; fine
  * for the common case (one adapter instance serving one, or a modest number of, conversations)
  * but worth knowing for a long-lived, high-attachment-cardinality server process.
+ *
+ * <p>Schemas too large for Anthropic's strict grammar: Anthropic compiles a {@code responseSchema}
+ * into a grammar and rejects one whose grammar is too large (a 400 {@code invalid_request_error}
+ * saying "compiled grammar is too large"). That depends on the whole schema's size, so
+ * {@link #responseSchemaProblem} can't predict it. Unless the request's
+ * {@code structuredOutputStrategy} is {@code NATIVE}, the call is retried once on the same model
+ * with the schema in the prompt, as {@code PROMPT_FALLBACK} sends it; the reply must then parse as
+ * JSON and fit the schema, or the attempt fails. The outcome is remembered per (model, schema) for
+ * this adapter's life, so later calls with that schema go straight to the prompt. A WARN is logged
+ * once per schema.
  */
 public final class AnthropicAdapter implements ProviderAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(AnthropicAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
+    private static final String GRAMMAR_TOO_LARGE = "compiled grammar is too large";
+    private static final JsonMapper JSON = JsonMapper.builder()
+            .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+            .build();
 
     private final AnthropicClient client;
     private final Map<String, String> uploadedFileIdsByContentHash = new ConcurrentHashMap<>();
+    /** {@code model + " " + schema hash} for each schema Anthropic's grammar rejected as too large. */
+    private final Set<String> schemasTooLargeForGrammar = ConcurrentHashMap.newKeySet();
+    private final Set<String> warnedSchemaHashes = ConcurrentHashMap.newKeySet();
 
     /** Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's null/blank. */
     public AnthropicAdapter(String apiKey) {
@@ -118,22 +148,36 @@ public final class AnthropicAdapter implements ProviderAdapter {
     @Override
     public Response send(String model, Request adaptedRequest) {
         requireAvailable();
-        Message message = client.messages().create(toParams(model, adaptedRequest));
-        return fromMessage(message);
+        return withGrammarFallback(model, adaptedRequest,
+                request -> fromMessage(client.messages().create(toParams(model, request))));
     }
 
     @Override
     public CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         requireAvailable();
-        return client.async().messages().create(toParams(model, adaptedRequest)).thenApply(this::fromMessage);
+        Function<Request, CompletableFuture<Response>> sender =
+                request -> client.async().messages().create(toParams(model, request)).thenApply(this::fromMessage);
+        if (sendsSchemaInPrompt(model, adaptedRequest)) {
+            return sendWithSchemaInPrompt(adaptedRequest, sender);
+        }
+        return sender.apply(adaptedRequest).exceptionallyCompose(failure -> {
+            Throwable cause = failure instanceof CompletionException && failure.getCause() != null ? failure.getCause() : failure;
+            return switchesToPrompt(model, adaptedRequest, cause)
+                    ? sendWithSchemaInPrompt(adaptedRequest, sender)
+                    : CompletableFuture.failedFuture(cause);
+        });
     }
 
     /** Streams via the Messages API's server-sent events, accumulating them into the same {@link Message} {@link #send} would return. */
     @Override
     public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
         requireAvailable();
+        return withGrammarFallback(model, adaptedRequest, request -> stream(model, request, onText));
+    }
+
+    private Response stream(String model, Request request, Consumer<String> onText) {
         MessageAccumulator accumulator = MessageAccumulator.create();
-        try (StreamResponse<RawMessageStreamEvent> stream = client.messages().createStreaming(toParams(model, adaptedRequest))) {
+        try (StreamResponse<RawMessageStreamEvent> stream = client.messages().createStreaming(toParams(model, request))) {
             stream.stream().forEach(event -> {
                 accumulator.accumulate(event);
                 event.contentBlockDelta()
@@ -142,6 +186,94 @@ public final class AnthropicAdapter implements ProviderAdapter {
             });
         }
         return fromMessage(accumulator.message());
+    }
+
+    /**
+     * Sends {@code request}; if Anthropic rejects its schema as too large for its grammar, sends it
+     * again with the schema in the prompt (see the class javadoc).
+     */
+    private Response withGrammarFallback(String model, Request request, Function<Request, Response> sender) {
+        if (sendsSchemaInPrompt(model, request)) {
+            return checkedPromptReply(request, sender.apply(CapabilityNegotiator.withSchemaInPrompt(request)));
+        }
+        try {
+            return sender.apply(request);
+        } catch (RuntimeException e) {
+            if (!switchesToPrompt(model, request, e)) {
+                throw e;
+            }
+            return checkedPromptReply(request, sender.apply(CapabilityNegotiator.withSchemaInPrompt(request)));
+        }
+    }
+
+    private static CompletableFuture<Response> sendWithSchemaInPrompt(
+            Request request, Function<Request, CompletableFuture<Response>> sender) {
+        return sender.apply(CapabilityNegotiator.withSchemaInPrompt(request))
+                .thenApply(reply -> checkedPromptReply(request, reply));
+    }
+
+    /** Whether an earlier call already found this request's schema too large for {@code model}'s grammar. */
+    private boolean sendsSchemaInPrompt(String model, Request request) {
+        return request.getResponseSchema() != null && !nativeOnly(request) && !schemasTooLargeForGrammar.isEmpty()
+                && schemasTooLargeForGrammar.contains(model + " " + schemaHash(request.getResponseSchema()));
+    }
+
+    /**
+     * Whether {@code failure} is Anthropic rejecting this request's schema as too large for its
+     * grammar, and the request's strategy allows the prompt instead; if so, remembers it.
+     */
+    private boolean switchesToPrompt(String model, Request request, Throwable failure) {
+        if (request.getResponseSchema() == null || nativeOnly(request) || !isGrammarTooLarge(failure)) {
+            return false;
+        }
+        String hash = schemaHash(request.getResponseSchema());
+        schemasTooLargeForGrammar.add(model + " " + hash);
+        if (warnedSchemaHashes.add(hash)) {
+            log.warn("Schema too large for Anthropic's strict grammar; answering with the schema in the prompt instead "
+                    + "(model {}, schema {})", model, hash.substring(0, 12));
+        }
+        return true;
+    }
+
+    private static boolean nativeOnly(Request request) {
+        return request.getConfig() != null
+                && request.getConfig().getStructuredOutputStrategy() == StructuredOutputStrategy.NATIVE;
+    }
+
+    private static boolean isGrammarTooLarge(Throwable failure) {
+        return failure instanceof AnthropicServiceException e
+                && e.statusCode() == 400
+                && e.errorType().map(ErrorType.INVALID_REQUEST_ERROR::equals).orElse(false)
+                && String.valueOf(e.getMessage()).toLowerCase(Locale.ROOT).contains(GRAMMAR_TOO_LARGE);
+    }
+
+    /**
+     * {@code reply} to a request whose schema went in the prompt, if its content is JSON that fits
+     * the schema; otherwise fails the attempt, so the router's usual fallback rules apply.
+     */
+    private static Response checkedPromptReply(Request request, Response reply) {
+        Object parsed;
+        try {
+            parsed = JSON.readValue(reply.getContent(), new TypeReference<Object>() {
+            });
+        } catch (JacksonException e) {
+            throw new IllegalStateException("Structured output failed: the reply to the schema in the prompt isn't valid JSON ("
+                    + e.getOriginalMessage() + ")", e);
+        }
+        String problem = ReplySchemaCheck.problem(request.getResponseSchema(), parsed);
+        if (problem != null) {
+            throw new IllegalStateException("Structured output failed: the reply to the schema in the prompt doesn't match it: "
+                    + problem);
+        }
+        return reply;
+    }
+
+    private static String schemaHash(Map<String, Object> schema) {
+        try {
+            return sha256(JSON.writeValueAsBytes(schema));
+        } catch (JacksonException e) {
+            throw new IllegalArgumentException("responseSchema could not be serialized to JSON", e);
+        }
     }
 
     private void requireAvailable() {
@@ -372,11 +504,16 @@ public final class AnthropicAdapter implements ProviderAdapter {
     }
 
     private static String contentHash(Attachment attachment) {
+        byte[] mediaType = String.valueOf(attachment.getMediaType()).getBytes(StandardCharsets.UTF_8);
+        return sha256(mediaType, new byte[] {0}, attachment.getData());
+    }
+
+    private static String sha256(byte[]... parts) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(String.valueOf(attachment.getMediaType()).getBytes(StandardCharsets.UTF_8));
-            digest.update((byte) 0);
-            digest.update(attachment.getData());
+            for (byte[] part : parts) {
+                digest.update(part);
+            }
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 not available", e);

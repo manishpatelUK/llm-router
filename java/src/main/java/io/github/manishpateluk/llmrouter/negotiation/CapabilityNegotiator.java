@@ -157,6 +157,19 @@ public final class CapabilityNegotiator {
     }
 
     /**
+     * The request with {@code responseSchema} moved into its system instructions, exactly as the
+     * {@code PROMPT_FALLBACK} path sends it — for an adapter whose provider rejects a schema only
+     * once it's sent, so the router couldn't move it beforehand.
+     */
+    public static Request withSchemaInPrompt(Request request) {
+        Objects.requireNonNull(request.getResponseSchema(), "request has no responseSchema");
+        return request.toBuilder()
+                .responseSchema(null)
+                .systemInstructions(withPromptFallbackInstruction(request.getSystemInstructions(), request.getResponseSchema()))
+                .build();
+    }
+
+    /**
      * The members of {@code required} that negotiating {@code request} against {@code model}
      * would drop (§5.4), in {@link Feature} declaration order — empty if the model can honor
      * every required feature the request actually uses. Defined in terms of {@link #negotiate}
