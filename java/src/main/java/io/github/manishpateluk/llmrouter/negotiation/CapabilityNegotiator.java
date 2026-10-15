@@ -9,10 +9,15 @@ import java.util.Set;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
+import io.github.manishpateluk.llmrouter.capability.ReasoningControl;
 import io.github.manishpateluk.llmrouter.config.Feature;
 import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
+import io.github.manishpateluk.llmrouter.config.ThinkingLevel;
 import io.github.manishpateluk.llmrouter.model.Attachment;
+import io.github.manishpateluk.llmrouter.model.DroppedAttachment;
+import io.github.manishpateluk.llmrouter.model.ReasoningSettings;
 import io.github.manishpateluk.llmrouter.model.Request;
+import io.github.manishpateluk.llmrouter.routing.AttachmentInspector;
 
 /**
  * Adapts an outgoing {@link Request} for one candidate model, per {@code LIBRARY_SPEC.md} §4.
@@ -22,6 +27,9 @@ import io.github.manishpateluk.llmrouter.model.Request;
 public final class CapabilityNegotiator {
 
     private static final ObjectMapper SCHEMA_MAPPER = new ObjectMapper();
+
+    /** Smallest thinking budget worth sending; Anthropic rejects anything lower (§7.4). */
+    public static final int MIN_REASONING_BUDGET_TOKENS = 1_024;
 
     private CapabilityNegotiator() {
     }
@@ -55,6 +63,19 @@ public final class CapabilityNegotiator {
     public static NegotiationResult negotiate(
             ModelEntry model, Request request, StructuredOutputStrategy strategy, Double temperature, Double topP,
             boolean schemaSupportedNatively) {
+        return negotiate(model, request, strategy, temperature, topP, schemaSupportedNatively, null);
+    }
+
+    /**
+     * {@link #negotiate(ModelEntry, Request, StructuredOutputStrategy, Double, Double, boolean)},
+     * also sending {@code reasoningLevel} to the model's own reasoning control (§7.4) —
+     * {@code null} sends none, leaving the provider's default. A thinking budget switches
+     * {@code temperature} and {@code topP} off for the attempt (dropped and recorded), since
+     * budget-style extended thinking doesn't allow changing them.
+     */
+    public static NegotiationResult negotiate(
+            ModelEntry model, Request request, StructuredOutputStrategy strategy, Double temperature, Double topP,
+            boolean schemaSupportedNatively, ThinkingLevel reasoningLevel) {
         Objects.requireNonNull(model, "model must not be null");
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(strategy, "strategy must not be null");
@@ -77,10 +98,21 @@ public final class CapabilityNegotiator {
             adapted.tools(List.of());
         }
 
-        if (!request.getAttachments().isEmpty() && !allAttachmentsSupported(request.getAttachments(), model)) {
-            droppedFeatures.add("attachments");
-            adapted.attachments(List.of());
+        List<DroppedAttachment> droppedAttachments = new ArrayList<>();
+        if (!request.getAttachments().isEmpty()) {
+            List<Attachment> kept = keptAttachments(request.getAttachments(), model, droppedAttachments);
+            if (!droppedAttachments.isEmpty()) {
+                droppedFeatures.add("attachments");
+                adapted.attachments(kept);
+            }
         }
+
+        ReasoningSettings reasoning = reasoningLevel == null ? null : reasoningFor(model, request, reasoningLevel);
+        if (reasoning != null) {
+            adapted.reasoningEffort(reasoning.getEffort());
+            adapted.reasoningBudgetTokens(reasoning.getBudgetTokens());
+        }
+        boolean samplingLocked = reasoning != null && reasoning.getControl() == ReasoningControl.BUDGET;
 
         // Providers universally recommend altering temperature OR top_p, never both, since combining
         // them compounds unpredictably — not a wire-protocol restriction, but this library enforces it:
@@ -88,7 +120,7 @@ public final class CapabilityNegotiator {
         boolean preferTemperatureOverTopP = temperature != null && topP != null && model.isSupportsTemperature();
 
         if (temperature != null) {
-            if (model.isSupportsTemperature()) {
+            if (model.isSupportsTemperature() && !samplingLocked) {
                 adapted.temperature(temperature);
             } else {
                 droppedFeatures.add("temperature");
@@ -96,7 +128,7 @@ public final class CapabilityNegotiator {
         }
 
         if (topP != null) {
-            if (model.isSupportsTopP() && !preferTemperatureOverTopP) {
+            if (model.isSupportsTopP() && !preferTemperatureOverTopP && !samplingLocked) {
                 adapted.topP(topP);
             } else {
                 droppedFeatures.add("topP");
@@ -106,6 +138,8 @@ public final class CapabilityNegotiator {
         return NegotiationResult.builder()
                 .adaptedRequest(adapted.build())
                 .droppedFeatures(List.copyOf(droppedFeatures))
+                .droppedAttachments(List.copyOf(droppedAttachments))
+                .reasoning(reasoning)
                 .structuredOutputViaPromptFallback(structuredOutputViaPromptFallback)
                 .build();
     }
@@ -197,16 +231,105 @@ public final class CapabilityNegotiator {
                 .toList();
     }
 
-    private static boolean allAttachmentsSupported(List<Attachment> attachments, ModelEntry model) {
-        return attachments.stream().allMatch(attachment -> isAttachmentSupported(attachment, model));
+    /**
+     * The attachments {@code model} can take, in order, adding one {@link DroppedAttachment} per
+     * other attachment to {@code dropped}: a media type it doesn't accept, an image beyond its
+     * per-request image limit, or a PDF over its byte or page limit. Page limits apply only when
+     * the PDF's page count can be read.
+     */
+    private static List<Attachment> keptAttachments(List<Attachment> attachments, ModelEntry model, List<DroppedAttachment> dropped) {
+        List<Attachment> kept = new ArrayList<>();
+        int images = 0;
+        for (int i = 0; i < attachments.size(); i++) {
+            Attachment attachment = attachments.get(i);
+            String mediaType = ModelEntry.normalizeMediaType(attachment.getMediaType());
+            int bytes = attachment.getData() == null ? 0 : attachment.getData().length;
+            String reason = null;
+            if (!model.supportsMediaType(attachment.getMediaType())) {
+                reason = "model does not accept " + (mediaType.isEmpty() ? "attachments with no media type" : mediaType);
+            } else if (mediaType.startsWith("image/") && model.getMaxImagesPerRequest() != null
+                    && images >= model.getMaxImagesPerRequest()) {
+                reason = "over the model's limit of " + model.getMaxImagesPerRequest() + " images per request";
+            } else if (mediaType.equals("application/pdf") && model.getMaxPdfBytes() != null && bytes > model.getMaxPdfBytes()) {
+                reason = "PDF is " + bytes + " bytes, over the model's limit of " + model.getMaxPdfBytes();
+            } else if (mediaType.equals("application/pdf") && model.getMaxPdfPages() != null) {
+                int pages = AttachmentInspector.pdfPageCount(attachment.getData());
+                if (pages > model.getMaxPdfPages()) {
+                    reason = "PDF has " + pages + " pages, over the model's limit of " + model.getMaxPdfPages();
+                }
+            }
+            if (reason == null) {
+                kept.add(attachment);
+                if (mediaType.startsWith("image/")) {
+                    images++;
+                }
+            } else {
+                dropped.add(DroppedAttachment.builder()
+                        .index(i)
+                        .mediaType(attachment.getMediaType())
+                        .filename(attachment.getFilename())
+                        .reason(reason)
+                        .build());
+            }
+        }
+        return kept;
     }
 
-    private static boolean isAttachmentSupported(Attachment attachment, ModelEntry model) {
-        String mediaType = attachment.getMediaType();
-        if (mediaType != null && mediaType.startsWith("image/")) {
-            return model.isSupportsVision();
+    /**
+     * The reasoning control to send {@code model} for {@code level} (§7.4), or {@code null} for
+     * none. Effort: the model's own level of the same name, or the nearest by position in its
+     * {@code reasoningEffortLevels}; {@code MAX} is always its highest. Budget: {@code LOW} sends
+     * none (the provider default, no extended thinking); {@code MEDIUM}, {@code HIGH} and
+     * {@code MAX} send 4,096, 16,384 and 32,768 tokens, capped at half the attempt's output limit so
+     * the answer keeps room, and none at all when that cap falls below
+     * {@link #MIN_REASONING_BUDGET_TOKENS}.
+     */
+    public static ReasoningSettings reasoningFor(ModelEntry model, Request request, ThinkingLevel level) {
+        Objects.requireNonNull(level, "level must not be null");
+        switch (model.getReasoningControl()) {
+            case EFFORT -> {
+                List<String> levels = model.getReasoningEffortLevels();
+                if (levels.isEmpty()) {
+                    return null;
+                }
+                return ReasoningSettings.builder().control(ReasoningControl.EFFORT).effort(effortFor(level, levels)).build();
+            }
+            case BUDGET -> {
+                int budget = switch (level) {
+                    case LOW -> 0;
+                    case MEDIUM -> 4_096;
+                    case HIGH -> 16_384;
+                    case MAX -> 32_768;
+                };
+                int outputLimit = model.getMaxOutputTokens() > 0 ? model.getMaxOutputTokens() : Integer.MAX_VALUE;
+                if (request.getMaxOutputTokens() != null) {
+                    outputLimit = Math.min(outputLimit, request.getMaxOutputTokens());
+                }
+                budget = Math.min(budget, outputLimit / 2);
+                if (budget < MIN_REASONING_BUDGET_TOKENS) {
+                    return null;
+                }
+                return ReasoningSettings.builder().control(ReasoningControl.BUDGET).budgetTokens(budget).build();
+            }
+            default -> {
+                return null;
+            }
         }
-        return model.isSupportsFileInput();
+    }
+
+    private static String effortFor(ThinkingLevel level, List<String> levels) {
+        int last = levels.size() - 1;
+        if (level == ThinkingLevel.MAX) {
+            return levels.get(last);
+        }
+        if (levels.contains(level.wireValue())) {
+            return level.wireValue();
+        }
+        return switch (level) {
+            case LOW -> levels.get(0);
+            case MEDIUM -> levels.get(last / 2);
+            default -> levels.get(Math.max(0, last - 1));
+        };
     }
 
     private static String withPromptFallbackInstruction(String existingSystemInstructions, java.util.Map<String, Object> schema) {

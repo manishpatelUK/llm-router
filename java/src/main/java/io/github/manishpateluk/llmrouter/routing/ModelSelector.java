@@ -4,6 +4,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
@@ -85,6 +86,19 @@ public final class ModelSelector {
         Objects.requireNonNull(qualifyingSet, "qualifyingSet must not be null");
         return qualifyingSet.stream()
                 .sorted(Comparator.comparingDouble(m -> estimatedInputCost(m, promptTokens)))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Sorts a qualifying set ascending by {@code estimatedCost} — cheapest first (§5.3). The
+     * router passes the whole request's estimated cost on each model (input, attachments and
+     * expected output; see {@link RequestEstimator}). Ties keep the qualifying set's order.
+     */
+    public static List<ModelEntry> rankByEstimatedCost(List<ModelEntry> qualifyingSet, ToDoubleFunction<ModelEntry> estimatedCost) {
+        Objects.requireNonNull(qualifyingSet, "qualifyingSet must not be null");
+        Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
+        return qualifyingSet.stream()
+                .sorted(Comparator.comparingDouble(estimatedCost))
                 .collect(Collectors.toList());
     }
 

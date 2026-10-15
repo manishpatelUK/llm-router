@@ -73,16 +73,27 @@ Pull directly from the provider's docs when published. **When max output tokens 
 
 Mark any estimated (non-sourced) field for follow-up the next time the table is refreshed — the skill's report step (see the SKILL.md) should call these out explicitly rather than silently presenting them as sourced.
 
-## Capability flags (`supportsStructuredOutput`, `supportsTools`, `supportsVision`, `supportsFileInput`, `supportsFileOutput`)
+## Capability flags (`supportsStructuredOutput`, `supportsTools`, `supportsFileOutput`) and input media types
 
 Check the provider's own feature/model-comparison page or API reference; these are usually stated plainly (a feature support matrix or a per-model "capabilities" list). Rules of thumb when a specific model isn't individually documented but its provider's *platform* feature is:
 
 - If the provider's tool-calling / structured-output feature is documented as available "for all current models" or similar blanket statement, apply `true` to every current-generation model from that provider, `false` for explicitly legacy/deprecated ones.
 - `supportsStructuredOutput` means the model can enforce a JSON schema natively at all. Don't set it to `false` because the provider only accepts a JSON Schema subset (e.g. Anthropic requires `additionalProperties: false` and rejects `oneOf`). The adapter rewrites or reports those per schema, and the router handles them per request (`LIBRARY_SPEC.md` §4, "Schemas a provider can't enforce natively").
 - Very small (roughly <5B parameter) open-weight models frequently have unreliable or unsupported tool-calling and JSON-schema-constrained decoding even when the hosting platform technically exposes the parameter — default these to `false` unless the model card explicitly claims support.
-- Text-only model families (no documented image input) get `supportsVision: false` even if a same-family vision variant exists under a different model ID — score the exact model ID, not the family.
-- `supportsFileInput` (non-image document attachments, e.g. PDF): `true` only if the provider documents a general document/file-upload input mechanism for that model (not just images) — e.g. a Files API or inline-document content-block type. A provider whose API is purely OpenAI-compatible chat-completions with no documented document-upload path gets `false` even if the underlying model could theoretically handle document text pasted inline, since that's not a distinct request-level capability this flag is meant to track.
-  - **OpenRouter rows:** OpenRouter accepts `file` content parts on *every* model, parsing PDFs itself (for a per-page fee) when the model can't read files natively. Set `true` only when the model's own OpenRouter listing includes `file` among its input modalities (the `architecture.input_modalities` field of `https://openrouter.ai/api/v1/models`). Otherwise the flag would claim native support for what is really OpenRouter's paid parsing step.
+- `supportsTools` is about the API surface this library calls (Chat Completions for OpenAI and the OpenAI-compatible providers), not the model in general: a model whose page says tool calling needs a different API (e.g. OpenAI's Responses API only) gets `false`.
+
+### `inputMediaTypes` (replaces `supportsVision` / `supportsFileInput`)
+
+The exact MIME types the provider's API takes as request attachments **for that model ID**, lower-case, no parameters. Routing matches attachments against this list one by one (`LIBRARY_SPEC.md` §4), so list a type only when the provider documents it for this model; `supportsVision`/`supportsFileInput` are derived from it and no longer stored in the file.
+
+- **Images:** list each image type the provider documents (typically `image/png`, `image/jpeg`, `image/webp`, `image/gif`). Where a provider documents fewer (xAI: PNG and JPEG only), list only those, even if an aggregator in front of it claims more. Text-only model IDs get no image types even if a same-family vision variant exists under a different ID — score the exact model ID, not the family.
+- **Documents:** list `application/pdf` only when the provider documents a document input mechanism for that model (a Files API, an inline-document content block, a `file`/`file_url` content part). Add other document types (`text/plain`, DOC/DOCX, RTF) only when documented, and only when the adapter has a wire shape for them (Anthropic: PDF and plain text; OpenAI Chat Completions: PDF only; Perplexity: PDF, DOC, DOCX, TXT, RTF).
+  - **OpenRouter rows:** OpenRouter accepts `file` content parts on *every* model, parsing PDFs itself (for a per-page fee) when the model can't read files natively. List `application/pdf` only when the model's own OpenRouter listing includes `file` in `architecture.input_modalities` (`https://openrouter.ai/api/v1/models`), and images only when it includes `image`. Otherwise the row would claim native support for what is really OpenRouter's paid parsing step.
+- A model with no attachment input at all gets `[]`.
+
+### Attachment limits (`maxImagesPerRequest`, `maxPdfPages`, `maxPdfBytes`)
+
+Only from a published limit — `null` when the provider publishes none (don't estimate these; a wrong limit silently drops attachments). Use the per-model figure where a provider varies it by model (Anthropic: 600 images/pages on 1M-context models, 100 on 200k-context ones). Write byte limits in decimal (`32 MB` → `32000000`), the conservative reading when a provider doesn't say MB or MiB. Where only a per-request total is published (e.g. Anthropic's 32 MB request limit), use it as the per-PDF limit.
 - `supportsFileOutput`: `true` only if the provider documents a mechanism for the model to *produce* a downloadable file as part of a response (e.g. a code-execution tool with file output, or a dedicated image-generation tool) — not just text/JSON output. Most chat-completions-only providers (no code-execution or file-generation tool in their API) get `false`.
 
 ## `supportsTemperature`, `supportsTopP` (booleans)
@@ -90,6 +101,16 @@ Check the provider's own feature/model-comparison page or API reference; these a
 Whether the model's API accepts a caller-supplied value for that sampling parameter at all. Default `true` for both — nearly every chat-completions-style API exposes standard `temperature`/`top_p` parameters. Set to `false` only when the provider's own docs say the parameter is rejected, ignored, or locked to a fixed value for that specific model — the most common cause is an always-on deep/extended/adaptive reasoning mode (the same signal that earns the `thinkingScore` always-on-reasoning bonus above): those modes frequently force sampling to a fixed configuration internally and reject a caller override. A model whose reasoning mode is *toggleable* (off by default, or an explicit per-call flag) doesn't get this penalty — the restriction only applies while that mode is actually active, and this table scores the model's default calling shape.
 
 Score independently — a model can lock `temperature` while still honoring `topP` (or vice versa); don't assume one implies the other.
+
+## `reasoningControl`, `reasoningEffortLevels`
+
+How a caller sets the model's reasoning depth through the API this library calls (`LIBRARY_SPEC.md` §7.4):
+
+- **`effort`** when the model takes a named effort level: Anthropic `output_config.effort`, OpenAI Chat Completions `reasoning_effort`, OpenRouter `reasoning.effort`. List the accepted values in `reasoningEffortLevels`, lowest first, exactly as the provider spells them. Leave out off-switches (`none`, `minimal`): the router never turns reasoning off this way. Sources: the provider's model page or reasoning guide; for OpenRouter rows, the `reasoning.supported_efforts` of the model's entry in `https://openrouter.ai/api/v1/models`.
+- **`budget`** when the model takes a thinking-token budget instead (Anthropic `thinking.budget_tokens`, e.g. Claude Haiku 4.5). Check the model doesn't *reject* budgets — Claude 4.7+ models return 400 on `budget_tokens`, so they are `effort`.
+- **`none`** otherwise, including when the only control is a toggle outside the standard parameter (e.g. NVIDIA NIM's `chat_template_kwargs.enable_thinking`) or the parameter is documented only for a different model ID (Perplexity's `reasoning_effort` is documented for `sonar-deep-research` only).
+
+`reasoningControl` is independent of the `thinkingScore` reasoning bonus: a model can reason by default (bonus) and still offer no control (`none`).
 
 ## Worked example
 
@@ -99,7 +120,7 @@ Score independently — a model can lock `temperature` while still honoring `top
 
 Run the `update-model-capability-table` skill (`/update-model-capability-table`, with optional mode arguments — see the skill file for `add`, `provider:<name>`, and `prune` modes). At a high level a full refresh will, per provider:
 
-1. Re-fetch current pricing/lineup from the priority-ordered sources above, actively looking for models that aren't in the table yet — not just re-checking rows that already exist.
+1. Re-fetch current pricing/lineup from the priority-ordered sources above, actively looking for models that aren't in the table yet — not just re-checking rows that already exist. Re-check `inputMediaTypes`, the attachment limits and the reasoning fields too, not only prices.
 2. Diff against the existing `model-capability-table.json` — flag any model that's been retired/renamed for removal, and add any new model worth including.
 3. Recompute `thinkingScore`/`speedScore` using the heuristic above (not just copy old scores forward — tiers shift as lineups change).
 4. Finalize via a local Node (or equivalent) script that de-duplicates `models` by the `provider`+`model` primary key (keeping the last occurrence), stamps every surviving row's `lastUpdated` field with the current UTC timestamp (ISO 8601, e.g. `2026-09-14T13:09:26Z`) along with the top-level `lastUpdated`, and writes the file back. Report what changed and what was estimated vs. sourced.

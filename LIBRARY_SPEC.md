@@ -50,6 +50,8 @@ Request {
                                         // maxOutputTokens (§7.1); a higher value is lowered to it; must be > 0 when set
   temperature: number?                 // resolved from RouterConfig.temperature (§5) during capability negotiation (§4) — not set directly by callers
   topP: number?                        // resolved from RouterConfig.topP (§5) during capability negotiation (§4) — not set directly by callers
+  reasoningEffort: string?             // resolved during negotiation (§7.4) when RouterConfig.sendThinkingLevel is set — not set directly by callers
+  reasoningBudgetTokens: int?          // likewise, for a model whose reasoning control is a thinking budget (§7.4)
 }
 
 ToolDefinition {
@@ -115,7 +117,11 @@ Response {
                                         // small calls to 0, so sum this one when tracking spend across calls
   }
   droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
+  droppedAttachments: DroppedAttachment[]  // each attachment left out for the answering model, and why (§4); empty if all were sent
   attempts: AttemptRecord[]            // one entry per candidate tried before success (empty if first candidate succeeded)
+  thinkingLevel: string                // §12.3 — the level the answering candidate was resolved at; lower than requested
+                                        // only when FallbackPolicy "finish" stepped down (§5.1.2)
+  reasoning: ReasoningSettings?        // the reasoning control actually sent (§7.4); absent when none was sent
   generatedFiles: GeneratedFile[]?     // files the model produced (e.g. via code execution or image generation), if any
   citations: Citation[]                // sources the answer draws on, when the provider reports them; empty otherwise
   original: {}                         // the raw original output from the provide, for convenience
@@ -132,6 +138,20 @@ AttemptRecord {
   model: string
   outcome: "success" | "failed" | "skipped"   // §12.6
   reason: string?                      // error message or skip reason (e.g. "no API key detected")
+  thinkingLevel: string                // §12.3 — the level this candidate was resolved at (§5.1.2)
+}
+
+DroppedAttachment {
+  index: int                           // position in Request.attachments
+  mediaType: string
+  filename: string?
+  reason: string                       // e.g. "model does not accept application/pdf", "over the model's limit of 100 images per request"
+}
+
+ReasoningSettings {
+  control: "effort" | "budget"         // §12.11
+  effort: string?                      // the provider's own effort value sent, e.g. "high", "xhigh"
+  budgetTokens: int?                   // the thinking budget sent
 }
 
 GeneratedFile {
@@ -156,7 +176,7 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 | `responseSchema` | Sent natively via provider's structured-output mechanism | Dropped by default (`droppedFeatures` records it). Optionally, implementations may offer a `structuredOutputStrategy` on `RouterConfig`: `"native"` (fail/drop if unsupported), `"promptFallback"` (inject schema + "respond with JSON only" instructions into the system prompt and best-effort parse the result), or `"auto"` (native when available, prompt-fallback otherwise). Default is `"auto"`. |
 | `tools` | Sent natively via provider's tool-calling mechanism | Dropped, recorded in `droppedFeatures`. No prompt-based faking of tool calls — this is unreliable enough that dropping is the safe default. |
 | `history` | Mapped to provider's message format | N/A — all supported providers accept multi-turn history |
-| `attachments` | Sent natively via the provider's image/document input mechanism. Each attachment's `mediaType` is checked individually: `image/*` against `ModelEntry.supportsVision`, everything else against `ModelEntry.supportsFileInput`. | If **any** attachment in the request can't be supported by the chosen model, the whole `attachments` request is dropped (not sent) and recorded once in `droppedFeatures` — matching this table's existing feature-level (not per-item) granularity. |
+| `attachments` | Sent natively via the provider's image/document input mechanism. Each attachment is checked individually against `ModelEntry.inputMediaTypes` (§7.1; matching ignores case and parameters, and reads `image/jpg` as `image/jpeg`), and against the model's published limits: images beyond `maxImagesPerRequest`, and PDFs over `maxPdfBytes` or `maxPdfPages` (pages are counted from the PDF's page objects; a page limit applies only when the count can be read). | Only the attachments the model can't take are dropped; the rest are still sent. `droppedFeatures` records `"attachments"` once, and `Response.droppedAttachments` lists exactly which attachments were left out (by index, media type, filename) and why. |
 | `temperature` (`RouterConfig.temperature`) | Sent natively as the model's sampling-temperature parameter | Omitted from the outgoing request (not sent — the provider's own default applies), recorded in `droppedFeatures` |
 | `topP` (`RouterConfig.topP`) | Sent natively as the model's nucleus-sampling (top-p) parameter | Omitted from the outgoing request (not sent — the provider's own default applies), recorded in `droppedFeatures` |
 
@@ -164,7 +184,11 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 
 Separately, `Response.generatedFiles` is only ever populated when `ModelEntry.supportsFileOutput` is true for the model that served the request — this isn't something a caller requests per-call (there's no matching `Request` field), it's a property of whether the chosen model/provider combination can produce downloadable files at all (e.g. via a code-execution or image-generation tool).
 
-Every "dropped" outcome in this table becomes a **skip** instead when the feature is listed in `RouterConfig.requiredFeatures` — see §5.4.
+Every "dropped" outcome in this table becomes a **skip** instead when the feature is listed in `RouterConfig.requiredFeatures` — see §5.4. For `attachments` that means a model must take **every** attachment in the request to qualify.
+
+**Adapters send what negotiation leaves.** Each adapter sends every attachment it receives in its provider's own wire shape (Anthropic `image`/`document` blocks, with `document` used only for `application/pdf` and `text/plain`; OpenAI `image_url` and `file` parts, `file` for PDF only; Perplexity `file_url` parts; OpenRouter and the other OpenAI-compatible providers OpenAI's `file` part). An attachment type the provider can't take at all fails the attempt rather than being sent in a wrong shape; for models in the table, negotiation has already dropped such attachments (or skipped the candidate when `attachments` is required).
+
+**Reasoning effort.** When `RouterConfig.sendThinkingLevel` is set, negotiation also maps the candidate's thinking level onto its reasoning control (§7.4). A thinking budget (`reasoningControl: "budget"`) switches `temperature` and `topP` off for that attempt — they're omitted and recorded in `droppedFeatures` as if unsupported — because budget-style extended thinking doesn't allow changing them.
 
 This negotiation happens **per attempt**, not once — if the router falls back from a model that supports structured output to one that doesn't, the second attempt correctly drops it and reports that in `droppedFeatures`/`attempts`.
 
@@ -237,6 +261,8 @@ RouterConfig {
   temperature: number?              // optional sampling temperature; no default (provider's own default applies when omitted). Sent to the model only if the resolved candidate's ModelEntry.supportsTemperature is true (§4, §7.1) — otherwise omitted for that attempt and recorded in droppedFeatures. If topP is also set, temperature wins whenever the candidate supports both — see §4's mutual-exclusion note.
   topP: number?                     // optional nucleus-sampling (top-p) parameter; no default. Sent to the model only if the resolved candidate's ModelEntry.supportsTopP is true (§4, §7.1) — otherwise omitted for that attempt and recorded in droppedFeatures. If temperature is also set and the candidate supports both, topP is omitted instead — see §4's mutual-exclusion note.
   requiredFeatures: string[]?       // features that must never be dropped — values per §12.9; default empty. See §5.4.
+  fallback: FallbackPolicy?         // "sameDepth" | "finish"; default "sameDepth". See §5.1.2.
+  sendThinkingLevel: boolean?       // default false — send the thinking level to the model's own reasoning control (§7.4)
 }
 
 RouteEntry =
@@ -244,7 +270,9 @@ RouteEntry =
   | { provider: string }                  // provider only — resolved to a model at call time via thinkingLevel (§7.2)
 ```
 
-`provider` above must be one of the canonical provider IDs (§12.1). `thinkingLevel` and `structuredOutputStrategy` must be one of the exact literal values given here — see §12.3 and §12.4 for the consolidated, cross-language reference.
+`provider` above must be one of the canonical provider IDs (§12.1). `thinkingLevel`, `structuredOutputStrategy` and `fallback` must be one of the exact literal values given here — see §12.3, §12.4 and §12.10 for the consolidated, cross-language reference. Every field except `route` carries its default when unset; an implementation that lets a caller explicitly null one out (e.g. `thinkingLevel`, `fallback`) raises `INVALID_CONFIG` at call time (§10).
+
+Implementations should let callers derive a variant of a config that changes one field and keeps every other (a `toBuilder()`/copy-with idiom), so a wrapper that adjusts one preference never has to copy fields by hand and silently lose ones added later.
 
 ### 5.1 Routing & fallback
 
@@ -256,13 +284,44 @@ Provider-only entries (`{ provider: "openai" }`) are expanded at call time into 
 
 If every candidate in the resolved route fails or is skipped, the router raises a single, descriptive error (exception or error-return, per language convention) — e.g. `RouterExhaustedError` — whose payload is the full `attempts` list, so the caller can see exactly what was tried and why each attempt didn't succeed. This is not a generic error; the message should be human-readable and list each attempt.
 
+### 5.1.2 Fallback policy
+
+`fallback` decides what happens once every candidate at the requested `thinkingLevel` has failed or been skipped:
+
+- **`sameDepth`** (default): exhaustion (§5.1.1), exactly as without this field.
+- **`finish`**: the router resolves the route again **one level lower** — same route rules, same `requiredFeatures`, same `costOptimized` ordering, same context-window checks — and keeps going, down to `low`, before raising exhaustion. It never steps *up*: a call at `low` behaves like `sameDepth`.
+  - Only **provider-only entries and the default route** are re-resolved at lower levels. Fully-specified `{ provider, model }` entries are tried once, at the requested level.
+  - A (provider, model) already attempted or skipped at a higher level isn't tried again (two levels often resolve to the same model), and a provider-only entry that couldn't be expanded is recorded once, not once per level.
+  - Lower levels are resolved only when reached.
+  - Each `AttemptRecord.thinkingLevel` records the level its candidate was resolved at, and `Response.thinkingLevel` the level that answered, so callers can see that a lighter model answered. With `sendThinkingLevel`, a stepped-down candidate is sent its own lower level (§7.4).
+
 ### 5.2 Default route
 
 If `RouterConfig.route` is omitted entirely (or no config is passed at all), the router uses a **computed default route**: the built-in provider preference order (§6.2) filtered down to only providers for which credentials were detected at startup, each expanded via the default `thinkingLevel` ("medium"). If *no* provider credentials are detected at all, the first call raises a configuration error immediately (fail fast, don't silently no-op).
 
 ### 5.3 Cost-optimized ordering
 
-`costOptimized: true` changes how **provider-only route entries expand**, and how the **default route** expands: instead of picking a single model per provider via the thinking-level heuristic, the router gathers *all* models from that provider whose capability score qualifies for the requested `thinkingLevel` tier (§7.2) and orders them ascending by estimated cost (using the prompt's approximate token count against the Model Capability Table's per-token pricing), trying the cheapest qualifying model first.
+`costOptimized: true` changes how **provider-only route entries expand**, and how the **default route** expands: instead of picking a single model per provider via the thinking-level heuristic, the router gathers *all* models from that provider whose capability score qualifies for the requested `thinkingLevel` tier (§7.2) and orders them ascending by the **estimated cost of the whole request** on each model, trying the cheapest qualifying model first.
+
+**The estimate** (the same one every implementation should make, so routing agrees across languages):
+
+- **Input**: the prompt, system instructions, every history turn (content plus any tool calls' names and arguments, and a few tokens of per-message framing), tool definitions (name, description, parameter schema), and the response schema — text counted at about 4 characters per token — plus every attachment **the model accepts** (§4 drops the rest, so they cost nothing), at that provider's documented rate:
+
+  | Provider | Image | PDF page |
+  |---|---|---|
+  | Anthropic, Claude 4.7 and later | `ceil(w/28) × ceil(h/28)` after downscaling to 2576 px on the long edge and at most 4,784 tokens | ~3,800 (1,500–3,000 text tokens plus the page as an image) |
+  | Anthropic, earlier models | the same, downscaled to 1568 px and at most 1,568 tokens | ~3,800 |
+  | OpenAI | `ceil(w/32) × ceil(h/32)` patches, downscaled to at most 2,500, × 1.2 | ~3,000 (text plus a page image; no published figure) |
+  | Gemini 3 (OpenRouter `google/gemini-3*`) | 1,120 (default media resolution) | 560 |
+  | Gemini before 3 | 258 per 768 px tile (258 if both sides ≤ 384 px) | 258 |
+  | Everyone else (Perplexity's published rate) | `w × h / 750` after downscaling to 1568 px | ~1,000 (read as text) |
+
+  Image dimensions are read from the file header (PNG, JPEG, GIF, WebP); an unreadable image is treated as 1024 × 1024. PDF pages are counted from the file's page objects, falling back to one page per 100 KB. Other documents (e.g. `text/plain`) count as text, about one token per 4 bytes.
+- **Output**: `Request.maxOutputTokens` (capped at the model's `maxOutputTokens`), or 1,000 tokens when unset, at the model's output price.
+
+This is a ranking signal, not a bill: it uses no real tokenizer.
+
+**Context windows.** Independently of `costOptimized`, the router uses the same input estimate to skip any candidate whose `contextWindowTokens` can't hold it: a fully-specified entry is recorded as `"skipped"` with a reason such as `estimated request (~212000 tokens) exceeds the context window (200000 tokens)`, and provider-only entries and the default route expand only over models that fit (if none fits, the entry is skipped with `no <provider> model qualifies: ...`). Models missing from the table aren't checked, and nothing is skipped for size when a request interceptor (§4.1) is installed: it runs after this check and may shrink the request to fit (e.g. by compressing history against that model's window).
 
 Fully-specified `{ provider, model }` entries are never reordered by cost — an explicit model choice is always honored as given. `costOptimized` only affects how ambiguity (provider-only entries, or the default route) is resolved. When `costOptimized` is absent or `false`, it has no effect on ordering at all.
 
@@ -273,7 +332,7 @@ By default, a feature a candidate can't support is dropped and the attempt goes 
 - **What counts as unmet.** A required feature is unmet for a candidate exactly when §4 negotiation would record it in `droppedFeatures` for this request. So `responseSchema` honored via prompt-fallback (`structuredOutputStrategy` `"auto"` or `"promptFallback"`) counts as honored; to require native structured output, also set `structuredOutputStrategy: "native"`. A required feature the request doesn't actually use (e.g. `"tools"` required but `tools` empty) is trivially met.
 - **Fully-specified entries** whose model can't honor a required feature are skipped, not attempted, and recorded in `attempts` as `"skipped"` with a reason naming the unmet features (e.g. `model does not support required feature(s) [tools]`).
 - **Provider-only entries and the default route** expand only over the provider's models that can honor every required feature: the thinking-level heuristic (§7.2), and with `costOptimized` the qualifying set and cost ordering (§5.3), all run over that filtered lineup. If none of the provider's models qualify, the entry is recorded as `"skipped"` with a `null` model and a reason such as `no perplexity model supports required feature(s) [tools]`, rather than silently vanishing from `attempts`.
-- **Models missing from the capability table** have no data to check against, so, consistent with §4 sending their requests unadapted, they are attempted rather than skipped. Nothing is dropped for them either; an unsupported feature surfaces as a provider error and a normal failed attempt.
+- **Models missing from the capability table** have no data to check a requirement against, so when the request uses a required feature they are **skipped**, with a reason such as `model is not in the capability table, so required feature(s) [attachments] can't be verified`. When nothing required is in use they are attempted as before, with their requests sent unadapted (§4): nothing is dropped, and an unsupported feature surfaces as a provider error and a normal failed attempt.
 - **Exhaustion.** If every candidate is skipped or fails, the router raises the normal `ROUTER_EXHAUSTED` error (§5.1.1); the skip reasons in `attempts` (and the error message) show which required features couldn't be met where. This applies to the default route too: when credentials exist but no available provider can meet the requirements, the result is exhaustion, not `NO_PROVIDERS_CONFIGURED`.
 - **Default.** An empty `requiredFeatures` (the default) leaves routing and negotiation exactly as described in §4–§5.3.
 
@@ -333,14 +392,20 @@ ModelEntry {
   maxOutputTokens: int
   supportsStructuredOutput: boolean
   supportsTools: boolean
-  supportsVision: boolean
-  supportsFileInput: boolean    // can accept non-image file attachments (documents, etc.) in a request — §4
+  inputMediaTypes: string[]     // exact MIME types accepted as attachments, e.g. ["image/png", "image/jpeg", "application/pdf"] — §4
+  maxImagesPerRequest: int?     // most images one request may carry; null = no published limit
+  maxPdfPages: int?             // most pages one PDF may have; null = no published limit
+  maxPdfBytes: int?             // largest PDF in bytes; null = no published limit
   supportsFileOutput: boolean   // can produce downloadable generated files, e.g. via code execution or image generation — §4
   supportsTemperature: boolean  // accepts a caller-supplied sampling-temperature value — false if the model's API rejects/ignores it (e.g. a reasoning mode with a fixed sampling configuration) — §4
   supportsTopP: boolean         // accepts a caller-supplied nucleus-sampling (top-p) value, same rationale as supportsTemperature — §4
+  reasoningControl: string      // "none" | "effort" | "budget" — §7.4, §12.11
+  reasoningEffortLevels: string[]?  // for "effort": the values the model accepts, lowest first, e.g. ["low", "medium", "high", "xhigh", "max"]
   lastUpdated: string          // ISO 8601 UTC timestamp, e.g. "2026-09-14T13:09:08Z" — when this specific row was last verified/updated
 }
 ```
+
+`supportsVision` and `supportsFileInput` are no longer stored; implementations keep them readable for compatibility, derived from `inputMediaTypes` (any `image/*` type; any other type). A row registered the older way, with those two booleans and no `inputMediaTypes`, keeps their old meaning: any `image/*` when `supportsVision`, any other type when `supportsFileInput`.
 
 Library API surface for the table (name per language convention): `registerModel(entry)`, `updateModel(provider, model, partialFields)`, `removeModel(provider, model)`, `listModels(provider?)`. Updates take effect immediately for subsequent calls; no restart required.
 
@@ -384,6 +449,16 @@ EmbeddingModelEntry {
 ```
 
 `provider` + `model` is the primary key, as in §7.1. Implementations should let callers register and remove embedding rows at runtime, as they do chat rows, so a model the seed file doesn't list can still be priced. The only use the router makes of these rows is pricing `embed` calls (§3.2): the model itself is chosen by the request's `route` or the adapter's default.
+
+### 7.4 Reasoning controls
+
+`thinkingLevel` always chooses the model (§7.2). With `RouterConfig.sendThinkingLevel: true`, it also reaches the provider, through the chosen model's own reasoning control (`ModelEntry.reasoningControl`). The default is `false`, which leaves every model on its provider's default reasoning, so existing callers see no change.
+
+- **`effort`** — the model takes a named effort (Anthropic `output_config.effort`, OpenAI and most OpenAI-compatible providers `reasoning_effort`, OpenRouter `reasoning.effort`). `low`, `medium` and `high` map to the model's level of the same name in `reasoningEffortLevels`, or the nearest by position when it has none (`low` → the lowest, `medium` → the middle, `high` → the second-highest); `max` always maps to the model's **highest** level (e.g. `xhigh` or `max`).
+- **`budget`** — the model takes a thinking-token budget (Anthropic `thinking.budget_tokens` on models before Claude 4.6). `low` sends none (no extended thinking, the provider default); `medium`, `high` and `max` send 4,096, 16,384 and 32,768 tokens. The budget is capped at half the attempt's output limit (the model's `maxOutputTokens`, or `Request.maxOutputTokens` when lower), so the budget is always below `max_tokens` and the answer keeps room; if that cap is below 1,024 tokens (Anthropic's minimum), no budget is sent. Sending a budget also drops `temperature`/`topP` for the attempt (§4). OpenRouter sends a budget as `reasoning.max_tokens`; providers with no budget convention send none.
+- **`none`** — nothing is sent; the level only chooses the model.
+
+Models missing from the table get no reasoning control. `Response.reasoning` reports what was sent for the attempt that answered, so callers can log it.
 
 ---
 
@@ -458,7 +533,8 @@ No logging is mandatory-on by default beyond what the host application's logging
 | A `ToolDefinition` breaks the §3.1 rules (bad name, duplicate name, non-object `parameters`) | Raise an `INVALID_REQUEST` error immediately at call time, before any provider is contacted, listing every violation. |
 | A provider call fails (network, rate limit, 4xx/5xx, timeout) | Not fatal — recorded as a failed attempt, router advances to next candidate. |
 | Every candidate fails or is skipped | Raise `RouterExhaustedError` (or language equivalent) containing the full `attempts` list. |
-| Malformed `RouterConfig` (e.g. invalid `thinkingLevel` value) | Raise a configuration error immediately at call time, not buried inside routing logic. |
+| A candidate's context window can't hold the estimated request (§5.3) | Not an error — the candidate is skipped and recorded in `attempts`. |
+| Malformed `RouterConfig` (e.g. invalid `thinkingLevel` value, or `fallback` explicitly nulled) | Raise a configuration error immediately at call time, not buried inside routing logic. |
 
 ---
 
@@ -533,6 +609,14 @@ Each condition in §10 that results in a raised error should expose a stable, ma
 
 `tools` | `responseSchema` | `attachments` — the subset of §12.7 that can be required (§5.4). Each is the same literal that would otherwise appear in `droppedFeatures`. `temperature` and `topP` are deliberately excluded: they're sampling preferences rather than capabilities a call depends on, and the §4 mutual-exclusion rule would make requiring both unsatisfiable.
 
+### 12.10 `fallback`
+
+`sameDepth` | `finish` — semantics in §5.1.2. (Configuration formats with snake_case conventions, such as llm-agent-loop's Markdown front matter, may also accept `same_depth`.)
+
+### 12.11 `reasoningControl`
+
+`none` | `effort` | `budget` — semantics in §7.4. `ReasoningSettings.control` uses the same literals (never `none`, since nothing is reported when nothing is sent).
+
 ---
 
 ## 13. Proposal (not implemented): provider-run tools
@@ -565,7 +649,7 @@ ProviderTool {
 ### 13.2 Capability negotiation and fallback
 
 - **Capability data.** `ModelEntry` gains `providerTools: string[]`, the canonical IDs that model supports natively (§7.1). It is a list rather than a boolean per tool so new tool types don't need a schema change. Models with built-in, always-on search (e.g. Perplexity's Sonar models) are *not* listed as supporting `"webSearch"`: the caller can't switch that search on or off, so listing it would let negotiation claim to honor a request it isn't actually controlling. Routing to them for search stays an explicit route choice.
-- **Per-item dropping.** Unlike `attachments` (all-or-nothing, §4), provider tools are independent of each other, so each unsupported one is dropped individually. `droppedFeatures` records `"providerTools"` once (keeping §12.7's field-name granularity), and a new `Response.droppedProviderTools: string[]` lists exactly which canonical IDs were dropped.
+- **Per-item dropping.** As with `attachments` (§4), provider tools are independent of each other, so each unsupported one is dropped individually. `droppedFeatures` records `"providerTools"` once (keeping §12.7's field-name granularity), and a new `Response.droppedProviderTools: string[]` lists exactly which canonical IDs were dropped, mirroring `droppedAttachments`.
 - **No emulation.** The router never substitutes its own implementation (it doesn't run a search on the caller's behalf). That would break the library's side-effect-free guarantee (§3), for the same reason prompt-based tool faking is ruled out in §4.
 - **Requiring them.** `"providerTools"` joins §12.9, so `requiredFeatures` can make candidates that lack any requested provider tool skip rather than drop, with the same skip/exhaustion semantics as §5.4. A finer-grained form (requiring `webSearch` but tolerating loss of `webFetch`) is deferred until there's a concrete need.
 - **Fallback.** Negotiation stays per attempt. Falling back from a provider that ran a tool to one that can't is handled exactly like any other dropped feature. Fallback never resumes a partly completed provider-side tool run: each attempt is a fresh call.

@@ -1,6 +1,7 @@
 package io.github.manishpateluk.llmrouter.provider.anthropic;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -21,6 +22,7 @@ import com.anthropic.models.messages.DocumentBlockParam;
 import com.anthropic.models.messages.ImageBlockParam;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
+import com.anthropic.models.messages.OutputConfig;
 import com.anthropic.models.messages.MessageParam;
 import com.anthropic.models.messages.TextBlock;
 import com.anthropic.models.messages.ToolUseBlock;
@@ -322,6 +324,50 @@ class AnthropicAdapterTest {
         MessageParam toolTurn = captor.getValue().messages().get(0);
         assertThat(toolTurn.role()).isEqualTo(com.anthropic.models.messages.MessageParam.Role.USER);
         assertThat(toolTurn.content().asString()).isEqualTo("Tool result: legacy result");
+    }
+
+    @Test
+    void sendsANegotiatedEffortInOutputConfigAndABudgetAsEnabledThinking() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client);
+        adapter.send("claude-opus-5-5", Request.builder().prompt("Hi").reasoningEffort("xhigh").build());
+        adapter.send("claude-haiku-4-5-20251001", Request.builder().prompt("Hi").reasoningBudgetTokens(4096).build());
+        adapter.send("claude-opus-5-5", Request.builder().prompt("Hi").build());
+
+        MessageCreateParams effort = captor.getAllValues().get(0);
+        assertThat(effort.outputConfig().orElseThrow().effort()).contains(OutputConfig.Effort.XHIGH);
+        assertThat(effort.thinking()).isEmpty();
+        MessageCreateParams budget = captor.getAllValues().get(1);
+        assertThat(budget.thinking().orElseThrow().asEnabled().budgetTokens()).isEqualTo(4096);
+        assertThat(budget.outputConfig()).isEmpty();
+        MessageCreateParams neither = captor.getAllValues().get(2);
+        assertThat(neither.thinking()).isEmpty();
+        assertThat(neither.outputConfig()).isEmpty();
+    }
+
+    @Test
+    void plainTextDocumentsGoInlineAsTextAndOtherDocumentTypesAreRefused() {
+        when(client.messages()).thenReturn(messageService);
+        ArgumentCaptor<MessageCreateParams> captor = ArgumentCaptor.forClass(MessageCreateParams.class);
+        when(messageService.create(captor.capture())).thenReturn(textMessage("ok"));
+
+        AnthropicAdapter adapter = new AnthropicAdapter(client); // no Files API stubbed, so attachments go inline
+        adapter.send("claude-opus-5-5", Request.builder().prompt("read")
+                .attachments(List.of(Attachment.builder().mediaType("text/plain").data("hello".getBytes()).build()))
+                .build());
+
+        DocumentBlockParam document = firstContentBlock(captor.getValue()).asDocument();
+        assertThat(document.source().isText()).isTrue();
+        assertThat(document.source().asText().data()).isEqualTo("hello");
+
+        assertThatThrownBy(() -> adapter.send("claude-opus-5-5", Request.builder().prompt("read")
+                .attachments(List.of(Attachment.builder().mediaType("text/csv").data(new byte[]{1}).build()))
+                .build()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("text/csv");
     }
 
     private static ContentBlockParam firstContentBlock(MessageCreateParams sent) {

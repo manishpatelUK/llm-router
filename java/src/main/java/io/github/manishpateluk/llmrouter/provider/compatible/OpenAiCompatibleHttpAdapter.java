@@ -40,10 +40,10 @@ import io.github.manishpateluk.llmrouter.provider.compatible.HttpTransport.HttpR
  * <p>Known scope limits (documented rather than silently guessed at): the unified
  * {@code Message} history shape (§3) carries no tool-call id, so a {@code TOOL}-role history
  * entry is sent as a plain user-role message; {@code image/*} attachments are mapped to the
- * {@code image_url} content-part convention shared by every OpenAI-compatible API, while non-image
- * document attachments are sent only by subclasses that opt in via
- * {@link #supportsDocumentAttachments()} (OpenRouter's {@code file} content part) — the others
- * document no convention for them, so documents aren't sent there; {@code Response.generatedFiles} is
+ * {@code image_url} content-part convention shared by every OpenAI-compatible API, and every other
+ * attachment the router leaves in the request (it drops what the model's capability-table row
+ * doesn't accept, §4) goes as a document part — OpenAI's {@code file} part by default, or the
+ * provider's own shape via {@link #documentPart}; {@code Response.generatedFiles} is
  * always left empty, since none of these four providers document a file-generation mechanism.
  * Unlike {@code AnthropicAdapter}/{@code OpenAiAdapter}, attachments here are always re-embedded
  * inline on every call — none of these four vendors' OpenAI-compatible endpoints share a common,
@@ -148,6 +148,9 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         if (request.getTemperature() != null) {
             body.put("temperature", request.getTemperature());
         }
+        if (request.getReasoningEffort() != null || request.getReasoningBudgetTokens() != null) {
+            applyReasoning(body, request.getReasoningEffort(), request.getReasoningBudgetTokens());
+        }
         if (request.getTopP() != null) {
             body.put("top_p", request.getTopP());
         }
@@ -162,6 +165,21 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         return body;
     }
 
+    /**
+     * Adds the negotiated reasoning control (§7.4) to the request body: by default OpenAI's
+     * top-level {@code reasoning_effort}. A thinking budget has no common OpenAI-compatible
+     * convention, so the default sends none; a provider with one overrides this.
+     *
+     * @param effort the provider's effort value, or {@code null}
+     * @param budgetTokens the thinking budget, or {@code null}
+     */
+    protected void applyReasoning(ObjectNode body, String effort, Integer budgetTokens) {
+        if (effort != null) {
+            body.put("reasoning_effort", effort);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
     private ArrayNode buildMessages(Request request) {
         ArrayNode messages = MAPPER.createArrayNode();
 
@@ -195,13 +213,30 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
     }
 
     /**
-     * Whether this provider accepts non-image document attachments (PDFs etc.) as OpenRouter-style
-     * {@code {"type": "file", "file": {"filename", "file_data"}}} content parts. Off by default:
-     * only override it for a provider that documents that convention, since the others would
-     * reject or ignore the part.
+     * Whether non-image attachments are sent at all. On by default: the router has already dropped
+     * any the model's capability-table row doesn't accept (§4), so what's left is meant to be sent.
+     *
+     * @deprecated document support is decided per model by the capability table's
+     *             {@code inputMediaTypes}; override {@link #documentPart} to change the wire shape.
      */
+    @Deprecated
     protected boolean supportsDocumentAttachments() {
-        return false;
+        return true;
+    }
+
+    /**
+     * The content part for one non-image attachment ({@code position} counts documents from 1, for
+     * a default filename). Default: OpenAI's {@code {"type": "file", "file": {"filename",
+     * "file_data": "data:<type>;base64,..."}}}, which OpenRouter also takes.
+     */
+    protected ObjectNode documentPart(Attachment document, int position) {
+        ObjectNode filePart = MAPPER.createObjectNode();
+        filePart.put("type", "file");
+        ObjectNode file = filePart.putObject("file");
+        file.put("filename", document.getFilename() != null ? document.getFilename() : "document-" + position);
+        String base64Data = Base64.getEncoder().encodeToString(document.getData());
+        file.put("file_data", "data:" + document.getMediaType() + ";base64," + base64Data);
+        return filePart;
     }
 
     private static boolean isImage(Attachment attachment) {
@@ -251,14 +286,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         }
 
         for (int i = 0; i < documents.size(); i++) {
-            Attachment document = documents.get(i);
-            ObjectNode filePart = MAPPER.createObjectNode();
-            filePart.put("type", "file");
-            ObjectNode file = filePart.putObject("file");
-            file.put("filename", document.getFilename() != null ? document.getFilename() : "document-" + (i + 1));
-            String base64Data = Base64.getEncoder().encodeToString(document.getData());
-            file.put("file_data", "data:" + document.getMediaType() + ";base64," + base64Data);
-            parts.add(filePart);
+            parts.add(documentPart(documents.get(i), i + 1));
         }
 
         return node;

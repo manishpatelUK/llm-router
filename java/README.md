@@ -10,7 +10,7 @@ Include this in your `pom.xml`:
 <dependency>
   <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
-  <version>1.0.9</version>
+  <version>1.0.11</version>
 </dependency>
 ```
 
@@ -71,7 +71,34 @@ RouterConfig config = RouterConfig.builder()
 Response response = router.complete("Explain quantum entanglement simply.", config);
 ```
 
-Build a `RouterConfig` once and reuse it across calls — it's not meant to be rebuilt per request.
+Build a `RouterConfig` once and reuse it across calls — it's not meant to be rebuilt per request. To vary one setting, derive a copy with `toBuilder()`, which keeps every other field:
+
+```java
+RouterConfig quick = config.toBuilder().thinkingLevel(ThinkingLevel.LOW).build();
+```
+
+**How cost-optimized routing estimates cost.** It prices the whole request on each candidate: prompt, system instructions, history, tool definitions, the response schema, and attachments the model accepts (images and PDF pages at each provider's documented token rate), plus the expected output (`maxOutputTokens`, or 1,000 tokens if unset) at the model's output price. The same input estimate is checked against each model's context window whether or not `costOptimized` is on: a model that can't hold the request is skipped, with a reason in `getAttempts()`, and provider-only entries pick among the models that fit. (Not when you've installed a `RequestInterceptor`: it may shrink the request to fit, so nothing is skipped for size.) See §5.3 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the rates.
+
+**Stepping down rather than failing.** By default, once every candidate at the requested thinking level has failed or been skipped, you get a `RouterExhaustedException`. With `FallbackPolicy.FINISH`, the router tries provider-only entries (and the default route) again one level lower, down to `LOW`, before giving up. It never steps up, tries fully-specified entries only once, and never retries a model it has already tried:
+
+```java
+import io.github.manishpateluk.llmrouter.config.FallbackPolicy;
+
+RouterConfig finishing = config.toBuilder().fallback(FallbackPolicy.FINISH).build();
+
+Response response = router.complete("Draft the board update.", finishing);
+response.getThinkingLevel();                 // the level that answered, e.g. MEDIUM after a HIGH run stepped down
+response.getAttempts().get(0).getThinkingLevel(); // the level each earlier attempt was made at
+```
+
+**Sending the thinking level to the provider.** `thinkingLevel` always chooses the model. Set `sendThinkingLevel(true)` and it also goes to the chosen model's own reasoning control: Anthropic's `effort` (or a thinking budget on Claude Haiku 4.5), OpenAI's `reasoning_effort`, or OpenRouter's `reasoning.effort`. `MAX` maps to the model's highest level, such as `xhigh` or `max`. It's off by default, so models keep their provider's default reasoning. A thinking budget can't be combined with `temperature`/`topP`, so those are dropped and reported in `getDroppedFeatures()` for that attempt. `getReasoning()` on the response says what was sent:
+
+```java
+RouterConfig deep = config.toBuilder().thinkingLevel(ThinkingLevel.MAX).sendThinkingLevel(true).build();
+ReasoningSettings sent = router.complete("Find the flaw in this proof.", deep).getReasoning(); // e.g. effort "max", or null
+```
+
+See §5.1.2 and §7.4 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
 **Async:**
 
@@ -135,9 +162,21 @@ RouterConfig agentConfig = RouterConfig.builder()
 - If nothing qualifies, you get the usual `RouterExhaustedException`, and its `attempts()` list says why each candidate was skipped.
 - A required feature the request doesn't use is ignored, so one config can serve turns with and without tools.
 - `RESPONSE_SCHEMA` counts the prompt-fallback strategy as honoring the schema. Add `.structuredOutputStrategy(StructuredOutputStrategy.NATIVE)` if you need native structured output.
-- Models that aren't in the capability table are still attempted, because there's no data to rule them out.
+- A model that isn't in the capability table is skipped when the request uses a required feature, because there's no data to show it can honor it. When nothing required is in use, it's still attempted.
 
 See §5.4 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full rules.
+
+**Attachments the model can't take.** Each attachment is checked on its own against the model's accepted media types (`ModelEntry.getInputMediaTypes()`) and its published limits (images per request, PDF pages and size). Only the ones it can't take are left out; `getDroppedFeatures()` contains `"attachments"` and `getDroppedAttachments()` says which and why. With `requiredFeatures(Set.of(Feature.ATTACHMENTS))`, a model must take every attachment to be tried, so a PDF only ever goes to models that read PDFs:
+
+```java
+Response response = router.complete(Request.builder()
+    .prompt("What does this slide say?")
+    .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(pageBytes).filename("deck-p3.pdf").build()))
+    .config(config.toBuilder().requiredFeatures(Set.of(Feature.ATTACHMENTS)).build())
+    .build());
+```
+
+`ModelEntry.isSupportsVision()` and `isSupportsFileInput()` still work, derived from the media types. A `ModelEntry` you register with only those two flags keeps their old meaning.
 
 **Repeated attachments in a multi-turn conversation are deduplicated automatically.** If you pass the same attachment (byte-identical content) on `Request.attachments` across several calls — the common case for a tool-calling loop that keeps a file in context turn after turn — the Anthropic and OpenAI adapters upload it once via that provider's Files API and reference it by file id on every later call instead of re-encoding and re-sending the bytes. There's nothing to opt into: just keep passing the attachment as you already do, and reuse the same `LlmRouter` instance across the conversation (which you should be doing anyway). A few things worth knowing:
 

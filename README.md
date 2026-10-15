@@ -40,7 +40,7 @@ You only need to set the key(s) for whichever provider(s) you actually want to u
 ## Repository layout
 
 - **`LIBRARY_SPEC.md`** — the language-agnostic design specification. This is the source of truth for what every language implementation should do; each per-language folder implements it in that language's own idiom.
-- **`model-capability-table.json`** — seed data for the router's Model Capability Table (`LIBRARY_SPEC.md` §7): per-model pricing, `thinkingScore`/`speedScore`, context window, and capability flags, across Anthropic, OpenAI, Perplexity, NVIDIA, and OpenRouter (Hugging Face is intentionally excluded — see below).
+- **`model-capability-table.json`** — seed data for the router's Model Capability Table (`LIBRARY_SPEC.md` §7): per-model pricing, `thinkingScore`/`speedScore`, context window, capability flags, accepted attachment media types and limits, and reasoning controls, across Anthropic, OpenAI, Perplexity, NVIDIA, and OpenRouter (Hugging Face is intentionally excluded — see below).
 - **`MODEL_CAPABILITY_HEURISTICS.md`** — the methodology behind the numbers in the capability table: data sources, the `thinkingScore`/`speedScore` scoring heuristic, and estimation fallbacks. Read this before hand-editing the table.
 - **`java/`** — the [Java/Maven implementation](java/README.md).
 - Future language implementations get their own top-level folder alongside `java/`, each with its own `.gitignore`.
@@ -52,7 +52,14 @@ You only need to set the key(s) for whichever provider(s) you actually want to u
 3. The router resolves an ordered list of `(provider, model)` candidates — from your config, or a computed default of whichever providers it found credentials for — and tries them in order. Before each attempt it checks that model's entry in the Model Capability Table and adapts the request to what it actually supports (dropping or falling back on anything it can't send, and reporting that back to you). If a candidate fails, it moves to the next one automatically.
 4. You get back a unified response — the text, structured output, any tool calls, which provider/model actually served it, token usage and estimated cost, what (if anything) got dropped, and the full list of attempts if it didn't succeed on the first try.
 
-Optionally, `costOptimized: true` on a `RouterConfig` changes how ambiguous routing (a provider given without an exact model) resolves: instead of one model per provider, the router gathers every model that qualifies for the requested capability tier and tries the cheapest one first.
+Optionally, `costOptimized: true` on a `RouterConfig` changes how ambiguous routing (a provider given without an exact model) resolves: instead of one model per provider, the router gathers every model that qualifies for the requested capability tier and tries the cheapest one first, pricing the whole request (history, tools, attachments and expected output, not just the prompt). Any model whose context window can't hold the request is skipped either way.
+
+Two more `RouterConfig` settings shape how hard and how far the router tries:
+
+- `fallback: finish` lets a run step down one thinking level at a time, down to `low`, instead of failing once every model at the requested level has failed. The response says which level actually answered.
+- `sendThinkingLevel: true` sends the thinking level to the chosen model's own reasoning control (an effort level, or a thinking budget), not only uses it to pick the model.
+
+Attachments are matched one by one against each model's accepted media types (images, PDFs and other documents are listed separately in the capability table), so a model that can't read one attachment still gets the rest.
 
 This is a deliberately short summary — see [`LIBRARY_SPEC.md`](LIBRARY_SPEC.md) for the full, authoritative behavior spec (capability negotiation, the model-selection heuristic, cost-optimized ordering, credential detection, error codes, and the canonical enum values every language implementation must share).
 

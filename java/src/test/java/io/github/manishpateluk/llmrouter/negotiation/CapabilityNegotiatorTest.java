@@ -133,19 +133,26 @@ class CapabilityNegotiatorTest {
     }
 
     @Test
-    void mixedAttachmentsDropWholeListIfAnyUnsupported() {
+    void mixedAttachmentsDropOnlyTheUnsupportedOnes() {
+        Attachment png = Attachment.builder().mediaType("image/png").data(new byte[]{1}).build();
         Request request = Request.builder().prompt("p")
                 .attachments(List.of(
-                        Attachment.builder().mediaType("image/png").data(new byte[]{1}).build(),
-                        Attachment.builder().mediaType("application/pdf").data(new byte[]{2}).build()))
+                        png,
+                        Attachment.builder().mediaType("application/pdf").data(new byte[]{2}).filename("deck.pdf").build()))
                 .build();
-        // Supports vision but not general file input -> the PDF can't be sent, so the whole list drops
+        // Supports vision but not general file input -> only the PDF is left out
         ModelEntry model = fixture(false, false, true, false);
 
         NegotiationResult result = CapabilityNegotiator.negotiate(model, request, StructuredOutputStrategy.AUTO);
 
         assertThat(result.getDroppedFeatures()).containsExactly("attachments");
-        assertThat(result.getAdaptedRequest().getAttachments()).isEmpty();
+        assertThat(result.getAdaptedRequest().getAttachments()).containsExactly(png);
+        assertThat(result.getDroppedAttachments()).singleElement().satisfies(dropped -> {
+            assertThat(dropped.getIndex()).isEqualTo(1);
+            assertThat(dropped.getMediaType()).isEqualTo("application/pdf");
+            assertThat(dropped.getFilename()).isEqualTo("deck.pdf");
+            assertThat(dropped.getReason()).isEqualTo("model does not accept application/pdf");
+        });
     }
 
     @Test

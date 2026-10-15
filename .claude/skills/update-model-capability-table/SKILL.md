@@ -63,7 +63,7 @@ For each provider in scope, compare what you found against the existing entries:
 
 ### 5. Score every changed or new entry
 
-Apply `MODEL_CAPABILITY_HEURISTICS.md` § `thinkingScore` and § `speedScore` exactly: base tier score, then the documented adjustments, rounded to the nearest 0.5. For context window / max output tokens / capability flags, prefer sourced values; when a field genuinely isn't published, use the estimation fallbacks documented there — and track which fields you estimated vs. sourced for the report.
+Apply `MODEL_CAPABILITY_HEURISTICS.md` § `thinkingScore` and § `speedScore` exactly: base tier score, then the documented adjustments, rounded to the nearest 0.5. Fill `inputMediaTypes`, `maxImagesPerRequest`/`maxPdfPages`/`maxPdfBytes`, and `reasoningControl`/`reasoningEffortLevels` per the matching sections there — every row carries all of them (`null` for an unpublished limit, `[]` for no attachment input, `null` effort levels unless `reasoningControl` is `effort`). Don't add `supportsVision`/`supportsFileInput` to rows; they're derived from `inputMediaTypes`. For context window / max output tokens / capability flags, prefer sourced values; when a field genuinely isn't published, use the estimation fallbacks documented there — and track which fields you estimated vs. sourced for the report.
 
 ### 6. Rewrite the file
 

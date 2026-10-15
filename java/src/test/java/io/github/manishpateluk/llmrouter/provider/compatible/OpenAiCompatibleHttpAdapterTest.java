@@ -168,19 +168,58 @@ class OpenAiCompatibleHttpAdapterTest {
     }
 
     @Test
-    void providersWithoutADocumentConventionStillSendOnlyImages() throws Exception {
+    void perplexitySendsDocumentsAsBareBase64FileUrlParts() throws Exception {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
 
         PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
         adapter.send("sonar-pro", Request.builder()
                 .prompt("read this")
-                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1}).build()))
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).filename("a.pdf").build()))
                 .build());
 
-        JsonNode message = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0);
-        assertThat(message.path("content").isString()).isTrue();
-        assertThat(message.path("content").asText()).isEqualTo("read this");
+        JsonNode parts = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0).path("content");
+        assertThat(parts).hasSize(2);
+        assertThat(parts.get(1).path("type").asText()).isEqualTo("file_url");
+        assertThat(parts.get(1).path("file_url").path("url").asText()).isEqualTo("AQID");
+        assertThat(parts.get(1).path("file_name").asText()).isEqualTo("a.pdf");
+    }
+
+    @Test
+    void nvidiaSendsDocumentsAsOpenAiFileParts() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        new NvidiaAdapter("key", transport).send("some-vision-model", Request.builder()
+                .prompt("read this")
+                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).build()))
+                .build());
+
+        JsonNode part = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0).path("content").get(1);
+        assertThat(part.path("type").asText()).isEqualTo("file");
+        assertThat(part.path("file").path("file_data").asText()).isEqualTo("data:application/pdf;base64,AQID");
+    }
+
+    @Test
+    void reasoningEffortIsSentAsReasoningEffortByDefaultAndAsAReasoningObjectToOpenRouter() throws Exception {
+        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
+        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
+
+        new NvidiaAdapter("key", transport).send("m", Request.builder().prompt("p").reasoningEffort("high").build());
+        assertThat(JSON.readTree(captor.getValue().jsonBody()).path("reasoning_effort").asText()).isEqualTo("high");
+
+        new OpenRouterAdapter("key", transport).send("m", Request.builder().prompt("p").reasoningEffort("low").build());
+        JsonNode body = JSON.readTree(captor.getValue().jsonBody());
+        assertThat(body.path("reasoning").path("effort").asText()).isEqualTo("low");
+        assertThat(body.has("reasoning_effort")).isFalse();
+
+        new OpenRouterAdapter("key", transport).send("m", Request.builder().prompt("p").reasoningBudgetTokens(2048).build());
+        assertThat(JSON.readTree(captor.getValue().jsonBody()).path("reasoning").path("max_tokens").asInt()).isEqualTo(2048);
+
+        new NvidiaAdapter("key", transport).send("m", Request.builder().prompt("p").build());
+        body = JSON.readTree(captor.getValue().jsonBody());
+        assertThat(body.has("reasoning_effort")).isFalse();
+        assertThat(body.has("reasoning")).isFalse();
     }
 
     @Test

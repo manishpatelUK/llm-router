@@ -783,7 +783,31 @@ class LlmRouterTest {
     }
 
     @Test
-    void requiredToolsStillAttemptsModelMissingFromCapabilityTable() {
+    void requiredToolsSkipsModelMissingFromCapabilityTable() {
+        stubId(openai, Provider.OPENAI);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENAI, "not-in-table"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        assertThat(response.getModelUsed()).isEqualTo("gpt-6-astra");
+        assertThat(response.getAttempts()).singleElement().satisfies(attempt -> {
+            assertThat(attempt.getModel()).isEqualTo("not-in-table");
+            assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+            assertThat(attempt.getReason()).isEqualTo(
+                    "model is not in the capability table, so required feature(s) [tools] can't be verified");
+        });
+        verify(openai, never()).send(eq("not-in-table"), any());
+    }
+
+    @Test
+    void modelMissingFromCapabilityTableIsStillAttemptedWhenNothingRequiredIsInUse() {
         stubId(openai, Provider.OPENAI);
         when(openai.isAvailable()).thenReturn(true);
         when(openai.send(eq("not-in-table"), any())).thenReturn(fragment("ok"));
@@ -791,12 +815,10 @@ class LlmRouterTest {
         LlmRouter router = new LlmRouter(List.of(openai));
         RouterConfig config = RouterConfig.builder()
                 .route(List.of(RouteEntry.of(Provider.OPENAI, "not-in-table")))
-                .requiredFeatures(Set.of(Feature.TOOLS))
+                .requiredFeatures(Set.of(Feature.TOOLS)) // required, but this request has no tools
                 .build();
 
-        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
-
-        assertThat(response.getContent()).isEqualTo("ok");
+        assertThat(router.complete(Request.builder().prompt("hi").config(config).build()).getContent()).isEqualTo("ok");
     }
 
     @Test
