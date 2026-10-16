@@ -35,6 +35,11 @@ public enum ThinkingLevel {
         throw new IllegalArgumentException("Unknown thinkingLevel: " + value);
     }
 
+    /** The next level down, or {@code null} below {@code LOW} — used by {@code FallbackPolicy.FINISH}. */
+    public ThinkingLevel lower() {
+        return ordinal() == 0 ? null : values()[ordinal() - 1];
+    }
+
     @Override
     public String toString() {
         return wireValue;

@@ -1,6 +1,7 @@
 package io.github.manishpateluk.llmrouter.provider.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -18,6 +19,7 @@ import io.github.manishpateluk.llmrouter.model.ToolCall;
 import io.github.manishpateluk.llmrouter.provider.Provider;
 import com.openai.client.OpenAIClient;
 import com.openai.client.OpenAIClientAsync;
+import com.openai.models.ReasoningEffort;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionContentPart;
@@ -262,6 +264,34 @@ class OpenAiAdapterTest {
 
         assertThat(captor.getValue().messages().get(0).asUser().content().asText())
                 .isEqualTo("Tool result: legacy result");
+    }
+
+    @Test
+    void sendsANegotiatedReasoningEffortAndNoneOtherwise() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+        when(completionService.create(captor.capture())).thenReturn(textCompletion("ok"));
+
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+        adapter.send("gpt-6-astra", Request.builder().prompt("Hi").reasoningEffort("xhigh").build());
+        adapter.send("gpt-6-astra", Request.builder().prompt("Hi").build());
+
+        assertThat(captor.getAllValues().get(0).reasoningEffort()).contains(ReasoningEffort.XHIGH);
+        assertThat(captor.getAllValues().get(1).reasoningEffort()).isEmpty();
+    }
+
+    @Test
+    void nonPdfDocumentsAreRefusedRatherThanSentAsFiles() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        OpenAiAdapter adapter = new OpenAiAdapter(client);
+
+        assertThatThrownBy(() -> adapter.send("gpt-6-astra", Request.builder().prompt("read")
+                .attachments(List.of(Attachment.builder().mediaType("text/csv").data(new byte[]{1}).build()))
+                .build()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("text/csv");
     }
 
     private static ChatCompletionContentPart firstContentPart(ChatCompletionCreateParams sent) {

@@ -41,6 +41,7 @@ import com.anthropic.models.messages.JsonOutputFormat;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.OutputConfig;
+import com.anthropic.models.messages.PlainTextSource;
 import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.models.messages.Tool;
 import com.anthropic.models.messages.ToolResultBlockParam;
@@ -70,9 +71,11 @@ import org.slf4j.LoggerFactory;
  * <p>Known scope limits (documented rather than silently guessed at): a history turn is sent
  * using Anthropic's native {@code tool_use}/{@code tool_result} content blocks only when the
  * caller populated {@code Message.toolCalls}/{@code toolCallId} (§3); without those, a {@code
- * TOOL}-role history entry falls back to a plain user-role message instead. Non-image attachments
- * are sent as PDF documents (the well-documented case) — other document media types are not yet
- * mapped; {@code Response.generatedFiles} is left empty, since nothing
+ * TOOL}-role history entry falls back to a plain user-role message instead. Documents are sent as
+ * {@code document} blocks for {@code application/pdf} and {@code text/plain} only — the two types
+ * Anthropic accepts; any other non-image type fails the attempt (the router drops such
+ * attachments before they get here for models in the capability table); {@code
+ * Response.generatedFiles} is left empty, since nothing
  * in a plain request causes Claude to produce a file without the caller also requesting a
  * code-execution-capable tool, which this adapter doesn't add implicitly.
  *
@@ -323,10 +326,18 @@ public final class AnthropicAdapter implements ProviderAdapter {
             builder.addTool(toAnthropicTool(tool));
         }
 
-        if (request.getResponseSchema() != null) {
-            builder.outputConfig(OutputConfig.builder()
-                    .format(JsonOutputFormat.builder().schema(toOutputSchema(request.getResponseSchema())).build())
-                    .build());
+        if (request.getResponseSchema() != null || request.getReasoningEffort() != null) {
+            OutputConfig.Builder outputConfig = OutputConfig.builder();
+            if (request.getResponseSchema() != null) {
+                outputConfig.format(JsonOutputFormat.builder().schema(toOutputSchema(request.getResponseSchema())).build());
+            }
+            if (request.getReasoningEffort() != null) {
+                outputConfig.effort(OutputConfig.Effort.of(request.getReasoningEffort()));
+            }
+            builder.outputConfig(outputConfig.build());
+        }
+        if (request.getReasoningBudgetTokens() != null) {
+            builder.enabledThinking(request.getReasoningBudgetTokens());
         }
 
         return builder.build();
@@ -455,7 +466,11 @@ public final class AnthropicAdapter implements ProviderAdapter {
 
     private ContentBlockParam toContentBlockParam(Attachment attachment) {
         String mediaType = attachment.getMediaType();
-        boolean isImage = mediaType != null && mediaType.startsWith("image/");
+        String normalized = ModelEntry.normalizeMediaType(mediaType);
+        boolean isImage = normalized.startsWith("image/");
+        if (!isImage && !normalized.equals("application/pdf") && !normalized.equals("text/plain")) {
+            throw new IllegalArgumentException("Anthropic accepts PDF and plain-text documents only, not " + mediaType);
+        }
         CacheControlEphemeral cacheControl = CacheControlEphemeral.builder().build();
 
         String fileId = uploadOrReuseFileId(attachment);
@@ -473,6 +488,12 @@ public final class AnthropicAdapter implements ProviderAdapter {
                             .mediaType(Base64ImageSource.MediaType.of(mediaType))
                             .data(base64Data)
                             .build())
+                    .cacheControl(cacheControl)
+                    .build());
+        }
+        if (normalized.equals("text/plain")) {
+            return ContentBlockParam.ofDocument(DocumentBlockParam.builder()
+                    .source(PlainTextSource.builder().data(new String(attachment.getData(), StandardCharsets.UTF_8)).build())
                     .cacheControl(cacheControl)
                     .build());
         }

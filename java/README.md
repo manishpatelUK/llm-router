@@ -10,7 +10,7 @@ Include this in your `pom.xml`:
 <dependency>
   <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
-  <version>1.0.9</version>
+  <version>1.0.11</version>
 </dependency>
 ```
 
@@ -71,7 +71,34 @@ RouterConfig config = RouterConfig.builder()
 Response response = router.complete("Explain quantum entanglement simply.", config);
 ```
 
-Build a `RouterConfig` once and reuse it across calls — it's not meant to be rebuilt per request.
+Build a `RouterConfig` once and reuse it across calls — it's not meant to be rebuilt per request. To vary one setting, derive a copy with `toBuilder()`, which keeps every other field:
+
+```java
+RouterConfig quick = config.toBuilder().thinkingLevel(ThinkingLevel.LOW).build();
+```
+
+**How cost-optimized routing estimates cost.** It prices the whole request on each candidate: prompt, system instructions, history, tool definitions, the response schema, and attachments the model accepts (images and PDF pages at each provider's documented token rate), plus the expected output (`maxOutputTokens`, or 1,000 tokens if unset) at the model's output price. The same input estimate is checked against each model's context window whether or not `costOptimized` is on: a model that can't hold the request is skipped, with a reason in `getAttempts()`, and provider-only entries pick among the models that fit. (Not when you've installed a `RequestInterceptor`: it may shrink the request to fit, so nothing is skipped for size.) See §5.3 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the rates.
+
+**Stepping down rather than failing.** By default, once every candidate at the requested thinking level has failed or been skipped, you get a `RouterExhaustedException`. With `FallbackPolicy.FINISH`, the router tries provider-only entries (and the default route) again one level lower, down to `LOW`, before giving up. It never steps up, tries fully-specified entries only once, and never retries a model it has already tried:
+
+```java
+import io.github.manishpateluk.llmrouter.config.FallbackPolicy;
+
+RouterConfig finishing = config.toBuilder().fallback(FallbackPolicy.FINISH).build();
+
+Response response = router.complete("Draft the board update.", finishing);
+response.getThinkingLevel();                 // the level that answered, e.g. MEDIUM after a HIGH run stepped down
+response.getAttempts().get(0).getThinkingLevel(); // the level each earlier attempt was made at
+```
+
+**Sending the thinking level to the provider.** `thinkingLevel` always chooses the model. Set `sendThinkingLevel(true)` and it also goes to the chosen model's own reasoning control: Anthropic's `effort` (or a thinking budget on Claude Haiku 4.5), OpenAI's `reasoning_effort`, or OpenRouter's `reasoning.effort`. `MAX` maps to the model's highest level, such as `xhigh` or `max`. It's off by default, so models keep their provider's default reasoning. A thinking budget can't be combined with `temperature`/`topP`, so those are dropped and reported in `getDroppedFeatures()` for that attempt. `getReasoning()` on the response says what was sent:
+
+```java
+RouterConfig deep = config.toBuilder().thinkingLevel(ThinkingLevel.MAX).sendThinkingLevel(true).build();
+ReasoningSettings sent = router.complete("Find the flaw in this proof.", deep).getReasoning(); // e.g. effort "max", or null
+```
+
+See §5.1.2 and §7.4 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
 **Async:**
 
@@ -135,16 +162,28 @@ RouterConfig agentConfig = RouterConfig.builder()
 - If nothing qualifies, you get the usual `RouterExhaustedException`, and its `attempts()` list says why each candidate was skipped.
 - A required feature the request doesn't use is ignored, so one config can serve turns with and without tools.
 - `RESPONSE_SCHEMA` counts the prompt-fallback strategy as honoring the schema. Add `.structuredOutputStrategy(StructuredOutputStrategy.NATIVE)` if you need native structured output.
-- Models that aren't in the capability table are still attempted, because there's no data to rule them out.
+- A model that isn't in the capability table is skipped when the request uses a required feature, because there's no data to show it can honor it. When nothing required is in use, it's still attempted.
 
 See §5.4 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full rules.
+
+**Attachments the model can't take.** Each attachment is checked on its own against the model's accepted media types (`ModelEntry.getInputMediaTypes()`) and its published limits (images per request, PDF pages and size). Only the ones it can't take are left out; `getDroppedFeatures()` contains `"attachments"` and `getDroppedAttachments()` says which and why. With `requiredFeatures(Set.of(Feature.ATTACHMENTS))`, a model must take every attachment to be tried, so a PDF only ever goes to models that read PDFs:
+
+```java
+Response response = router.complete(Request.builder()
+    .prompt("What does this slide say?")
+    .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(pageBytes).filename("deck-p3.pdf").build()))
+    .config(config.toBuilder().requiredFeatures(Set.of(Feature.ATTACHMENTS)).build())
+    .build());
+```
+
+`ModelEntry.isSupportsVision()` and `isSupportsFileInput()` still work, derived from the media types. A `ModelEntry` you register with only those two flags keeps their old meaning.
 
 **Repeated attachments in a multi-turn conversation are deduplicated automatically.** If you pass the same attachment (byte-identical content) on `Request.attachments` across several calls — the common case for a tool-calling loop that keeps a file in context turn after turn — the Anthropic and OpenAI adapters upload it once via that provider's Files API and reference it by file id on every later call instead of re-encoding and re-sending the bytes. There's nothing to opt into: just keep passing the attachment as you already do, and reuse the same `LlmRouter` instance across the conversation (which you should be doing anyway). A few things worth knowing:
 
 - Anthropic dedupes both images and documents this way, and also tags every attachment content block with an ephemeral `cache_control` hint so Anthropic can reuse the surrounding prompt prefix cheaply.
 - OpenAI dedupes documents only — Chat Completions has no file-id path for images, so image attachments always re-embed inline.
 - It's a pure optimization: if the upload call itself fails for any reason, that attempt transparently falls back to full inline embedding rather than failing your request.
-- The other providers (currently Perplexity, NVIDIA, Hugging Face, OpenRouter) have no equivalent mechanism this library can target generically, so attachments to them are unaffected.
+- The other providers (currently Perplexity, NVIDIA, Hugging Face, OpenRouter) have no equivalent mechanism this library can target generically, so attachments to them are re-sent inline on every call.
 
 See §8.1.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full design rationale.
 
@@ -181,7 +220,7 @@ Response response = router.completeStreaming(request, new StreamListener() {
 // response.getContent() is the full text; tool calls, usage etc. are on the response as usual.
 ```
 
-Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. All six built-in providers stream natively. A custom `ProviderAdapter` that doesn't override `sendStreaming` delivers its text in one piece, so the call works with any adapter. Perplexity reports token usage only if its stream happens to include it, since its API doesn't document an option to ask for it. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
+Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. All six built-in providers stream natively. A custom `ProviderAdapter` that doesn't override `sendStreaming` delivers its text in one piece, so the call works with any adapter. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
 
 `completeStreamingAsync(request, listener)` is the non-blocking form. It returns a `CompletableFuture<Response>` and follows the same rules. The listener is called from a background thread, one piece at a time and in order, so hand the text to your UI thread if your toolkit requires it:
 
@@ -192,7 +231,7 @@ router.completeStreamingAsync(request, delta -> ui.appendLater(delta))
 
 See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
-**Citations.** When a provider reports the sources its answer draws on, they come back on the response, in a provider-neutral shape. Today that's Perplexity, whose models search the web as they answer:
+**Citations.** When a provider reports the sources its answer draws on, they come back on the response, in a provider-neutral shape. Today that's Perplexity: the router switches on Perplexity's web search for every Perplexity call, whichever model it routes to:
 
 ```java
 import io.github.manishpateluk.llmrouter.model.Citation;
@@ -208,10 +247,23 @@ for (int i = 0; i < response.getCitations().size(); i++) {
 }
 ```
 
-- **Numbering.** The list keeps the provider's order, so a `[1]` marker in `getContent()` refers to `getCitations().get(0)`.
+- **Numbering.** The list follows Perplexity's own numbering of its search results, so a `[1]` (or `[web:1]`) marker in `getContent()` refers to `getCitations().get(0)`. Whether the answer carries markers at all is up to the model. `perplexity/sonar` and the presets add them; ask for them in your system instructions if another model leaves them out.
 - **Fields.** `getUrl()` is always set. `getTitle()` and `getSnippet()` are `null` when the provider doesn't give them.
 - **Streaming.** Streamed calls fill `getCitations()` too. Citations arrive on the returned `Response`, not through the listener.
 - **Other providers.** The list is empty for providers that don't report citations.
+
+**Perplexity** runs on its [Agent API](https://docs.perplexity.ai/docs/agent-api/quickstart), which serves Perplexity's own models and other vendors' models through one endpoint. Route entries name a model by its Agent API id:
+
+- **Seeded models.** `perplexity/sonar` (the grounded search model), `perplexity/kimi-k3`, `perplexity/glm-5.3`, `perplexity/glm-5.3-flash` and `perplexity/nemotron-3.5-super-120b-a12b` are in the capability table. A provider-only `RouteEntry.of(Provider.PERPLEXITY)` picks among them like any other provider.
+- **Other vendors through Perplexity.** Ids such as `openai/gpt-6-luna` or `anthropic/claude-sonnet-5-5` work as explicit route entries too. They aren't in the seed table, so register them with `ModelCapabilityTable.registerModel(...)` if you want capability negotiation and cost-ordering for them.
+- **Presets.** `RouteEntry.of(Provider.PERPLEXITY, "preset:fast")` (also `low`, `medium`, `high`, `xhigh`) runs one of Perplexity's [presets](https://docs.perplexity.ai/docs/agent-api/presets). A preset brings its own model, tools and output limit, and has no table row.
+- **Cost.** Perplexity reports each call's actual cost, including its per-search fee (about $0.0025 per search). `getUsage()` carries that figure rather than the table's token-price estimate. Cost-optimized ordering, which happens before the call, still uses the table's token prices only.
+
+**Upgrading from 1.0.x (Perplexity).** Perplexity retired Sonar Chat Completions, so this release moves the adapter to the Agent API. Code that uses only `Provider.PERPLEXITY` without naming a model needs no change. Otherwise:
+
+- `sonar` becomes `perplexity/sonar`. `sonar-pro` and `sonar-reasoning-pro` no longer exist: use `preset:fast` and `preset:low` (Perplexity's own suggested replacements), or a seeded model. The old ids aren't aliased. Perplexity rejects them, and the router falls back to your next route entry.
+- `PerplexityAdapter` moved from `provider.compatible` to `provider.perplexity`. This only matters if you construct adapters yourself.
+- Some Perplexity models now support tools (`perplexity/kimi-k3`, `perplexity/glm-5.3`, `perplexity/glm-5.3-flash`, `perplexity/nemotron-3.5-super-120b-a12b`), so a `requiredFeatures(TOOLS)` route no longer skips Perplexity outright.
 
 **Embeddings**, for semantic search:
 

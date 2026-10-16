@@ -31,6 +31,7 @@ import com.openai.core.http.StreamResponse;
 import com.openai.helpers.ChatCompletionAccumulator;
 import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
+import com.openai.models.ReasoningEffort;
 import com.openai.models.ResponseFormatJsonSchema;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
@@ -199,6 +200,9 @@ public final class OpenAiAdapter implements ProviderAdapter {
         if (request.getTopP() != null) {
             builder.topP(request.getTopP());
         }
+        if (request.getReasoningEffort() != null) {
+            builder.reasoningEffort(ReasoningEffort.of(request.getReasoningEffort()));
+        }
 
         String system = buildSystemInstructions(request);
         if (system != null) {
@@ -364,6 +368,10 @@ public final class OpenAiAdapter implements ProviderAdapter {
                     .build());
         }
 
+        if (!"application/pdf".equals(ModelEntry.normalizeMediaType(mediaType))) {
+            // Chat Completions file parts take PDFs only; the router drops anything else for table models (§4).
+            throw new IllegalArgumentException("OpenAI Chat Completions accepts PDF documents only, not " + mediaType);
+        }
         String filename = attachment.getFilename() == null ? "attachment" : attachment.getFilename();
         String fileId = uploadOrReuseFileId(attachment);
         if (fileId != null) {

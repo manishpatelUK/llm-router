@@ -78,7 +78,7 @@ class ModelCapabilityTableTest {
         assertThat(alwaysOnReasoningModel.isSupportsTemperature()).isFalse();
         assertThat(alwaysOnReasoningModel.isSupportsTopP()).isFalse();
 
-        ModelEntry ordinaryModel = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-haiku-4-5-20251001").orElseThrow();
+        ModelEntry ordinaryModel = ModelCapabilityTable.findModel(Provider.PERPLEXITY, "perplexity/sonar").orElseThrow();
         assertThat(ordinaryModel.isSupportsTemperature()).isTrue();
         assertThat(ordinaryModel.isSupportsTopP()).isTrue();
     }

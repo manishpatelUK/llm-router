@@ -56,6 +56,8 @@ class LlmRouterTest {
     private ProviderAdapter openrouter;
     @Mock
     private ProviderAdapter perplexity;
+    @Mock
+    private ProviderAdapter nvidia;
 
     @AfterEach
     void cleanUpRegisteredFixtures() {
@@ -97,10 +99,10 @@ class LlmRouterTest {
         stubId(anthropic, Provider.PERPLEXITY);
         when(anthropic.isAvailable()).thenReturn(true);
         List<Citation> citations = List.of(Citation.builder().url("https://example.org/a").title("A").build());
-        when(anthropic.send(eq("sonar"), any())).thenReturn(fragment("answer [1]").toBuilder().citations(citations).build());
+        when(anthropic.send(eq("perplexity/sonar"), any())).thenReturn(fragment("answer [1]").toBuilder().citations(citations).build());
 
         LlmRouter router = new LlmRouter(List.of(anthropic));
-        RouterConfig config = RouterConfig.builder().route(List.of(RouteEntry.of(Provider.PERPLEXITY, "sonar"))).build();
+        RouterConfig config = RouterConfig.builder().route(List.of(RouteEntry.of(Provider.PERPLEXITY, "perplexity/sonar"))).build();
 
         assertThat(router.complete("q", config).getCitations()).isEqualTo(citations);
     }
@@ -698,46 +700,66 @@ class LlmRouterTest {
     }
 
     @Test
-    void requiredToolsSkipsProviderOnlyEntryWithNoCapableModelUnderCostOptimizedRouting() {
-        // No Perplexity model in the capability table supports tools.
-        stubId(perplexity, Provider.PERPLEXITY);
+    void requiredAttachmentsSkipsProviderOnlyEntryWithNoCapableModelUnderCostOptimizedRouting() {
+        // No NVIDIA model in the capability table takes attachments.
+        stubId(nvidia, Provider.NVIDIA);
         stubId(openai, Provider.OPENAI);
-        when(perplexity.isAvailable()).thenReturn(true);
+        when(nvidia.isAvailable()).thenReturn(true);
         when(openai.isAvailable()).thenReturn(true);
         ArgumentCaptor<String> model = ArgumentCaptor.forClass(String.class);
         when(openai.send(model.capture(), any())).thenReturn(fragment("ok"));
 
-        LlmRouter router = new LlmRouter(List.of(perplexity, openai));
+        LlmRouter router = new LlmRouter(List.of(nvidia, openai));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.PERPLEXITY), RouteEntry.of(Provider.OPENAI)))
+                .route(List.of(RouteEntry.of(Provider.NVIDIA), RouteEntry.of(Provider.OPENAI)))
                 .costOptimized(true)
-                .requiredFeatures(Set.of(Feature.TOOLS))
+                .requiredFeatures(Set.of(Feature.ATTACHMENTS))
                 .build();
 
-        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+        Response response = router.complete(Request.builder().prompt("hi")
+                .attachments(List.of(TestMedia.pngAttachment())).config(config).build());
 
-        verify(perplexity, never()).send(any(), any());
-        assertThat(ModelCapabilityTable.findModel(Provider.OPENAI, model.getValue()).orElseThrow().isSupportsTools()).isTrue();
+        verify(nvidia, never()).send(any(), any());
+        assertThat(ModelCapabilityTable.findModel(Provider.OPENAI, model.getValue()).orElseThrow().isSupportsVision()).isTrue();
         assertThat(response.getAttempts()).singleElement().satisfies(attempt -> {
-            assertThat(attempt.getProvider()).isEqualTo(Provider.PERPLEXITY);
+            assertThat(attempt.getProvider()).isEqualTo(Provider.NVIDIA);
             assertThat(attempt.getModel()).isNull();
             assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
-            assertThat(attempt.getReason()).isEqualTo("no perplexity model supports required feature(s) [tools]");
+            assertThat(attempt.getReason()).isEqualTo("no nvidia model supports required feature(s) [attachments]");
         });
     }
 
     @Test
-    void requiredToolsOnDefaultRouteWithOnlyIncapableProvidersExhaustsRatherThanNoProvidersConfigured() {
-        stubId(perplexity, Provider.PERPLEXITY);
-        when(perplexity.isAvailable()).thenReturn(true);
+    void requiredAttachmentsOnDefaultRouteWithOnlyIncapableProvidersExhaustsRatherThanNoProvidersConfigured() {
+        stubId(nvidia, Provider.NVIDIA);
+        when(nvidia.isAvailable()).thenReturn(true);
 
-        LlmRouter router = new LlmRouter(List.of(perplexity));
-        RouterConfig config = RouterConfig.builder().requiredFeatures(Set.of(Feature.TOOLS)).build();
-        Request request = Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build();
+        LlmRouter router = new LlmRouter(List.of(nvidia));
+        RouterConfig config = RouterConfig.builder().requiredFeatures(Set.of(Feature.ATTACHMENTS)).build();
+        Request request = Request.builder().prompt("hi").attachments(List.of(TestMedia.pngAttachment())).config(config).build();
 
         assertThatThrownBy(() -> router.complete(request))
                 .isInstanceOf(RouterExhaustedException.class)
-                .hasMessageContaining("no perplexity model supports required feature(s) [tools]");
+                .hasMessageContaining("no nvidia model supports required feature(s) [attachments]");
+    }
+
+    @Test
+    void aCostTheProviderReportsIsKeptInsteadOfTheTableEstimate() {
+        stubId(perplexity, Provider.PERPLEXITY);
+        when(perplexity.isAvailable()).thenReturn(true);
+        Usage reported = Usage.builder().inputTokens(10).outputTokens(5).estimatedCostUsdCents(1).estimatedCostUsdMicros(5_000).build();
+        when(perplexity.send(eq("perplexity/sonar"), any())).thenReturn(fragment("answer").toBuilder().usage(reported).build());
+        when(perplexity.send(eq("perplexity/glm-5.3"), any())).thenReturn(fragment("answer"));
+
+        LlmRouter router = new LlmRouter(List.of(perplexity));
+        Response withReportedCost = router.complete("q", RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.PERPLEXITY, "perplexity/sonar"))).build());
+        Response withoutReportedCost = router.complete("q", RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.PERPLEXITY, "perplexity/glm-5.3"))).build());
+
+        assertThat(withReportedCost.getUsage().getEstimatedCostUsdMicros()).isEqualTo(5_000);
+        // 10 × $1.40/M + 5 × $4.40/M from the table
+        assertThat(withoutReportedCost.getUsage().getEstimatedCostUsdMicros()).isEqualTo(36);
     }
 
     @Test
@@ -783,7 +805,31 @@ class LlmRouterTest {
     }
 
     @Test
-    void requiredToolsStillAttemptsModelMissingFromCapabilityTable() {
+    void requiredToolsSkipsModelMissingFromCapabilityTable() {
+        stubId(openai, Provider.OPENAI);
+        when(openai.isAvailable()).thenReturn(true);
+        when(openai.send(eq("gpt-6-astra"), any())).thenReturn(fragment("ok"));
+
+        LlmRouter router = new LlmRouter(List.of(openai));
+        RouterConfig config = RouterConfig.builder()
+                .route(List.of(RouteEntry.of(Provider.OPENAI, "not-in-table"), RouteEntry.of(Provider.OPENAI, "gpt-6-astra")))
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .build();
+
+        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
+
+        assertThat(response.getModelUsed()).isEqualTo("gpt-6-astra");
+        assertThat(response.getAttempts()).singleElement().satisfies(attempt -> {
+            assertThat(attempt.getModel()).isEqualTo("not-in-table");
+            assertThat(attempt.getOutcome()).isEqualTo(AttemptOutcome.SKIPPED);
+            assertThat(attempt.getReason()).isEqualTo(
+                    "model is not in the capability table, so required feature(s) [tools] can't be verified");
+        });
+        verify(openai, never()).send(eq("not-in-table"), any());
+    }
+
+    @Test
+    void modelMissingFromCapabilityTableIsStillAttemptedWhenNothingRequiredIsInUse() {
         stubId(openai, Provider.OPENAI);
         when(openai.isAvailable()).thenReturn(true);
         when(openai.send(eq("not-in-table"), any())).thenReturn(fragment("ok"));
@@ -791,12 +837,10 @@ class LlmRouterTest {
         LlmRouter router = new LlmRouter(List.of(openai));
         RouterConfig config = RouterConfig.builder()
                 .route(List.of(RouteEntry.of(Provider.OPENAI, "not-in-table")))
-                .requiredFeatures(Set.of(Feature.TOOLS))
+                .requiredFeatures(Set.of(Feature.TOOLS)) // required, but this request has no tools
                 .build();
 
-        Response response = router.complete(Request.builder().prompt("hi").tools(ONE_TOOL).config(config).build());
-
-        assertThat(response.getContent()).isEqualTo("ok");
+        assertThat(router.complete(Request.builder().prompt("hi").config(config).build()).getContent()).isEqualTo("ok");
     }
 
     @Test

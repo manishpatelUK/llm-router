@@ -7,9 +7,9 @@ import java.util.function.Consumer;
 import io.github.manishpateluk.llmrouter.provider.ProviderAdapter;
 
 /**
- * A minimal HTTP transport seam — lets {@link OpenAiCompatibleHttpAdapter} be tested without any
- * real network I/O, by mocking this interface instead of {@code java.net.http.HttpClient}
- * directly (which has no interface of its own to mock against).
+ * A minimal HTTP transport seam — lets {@link OpenAiCompatibleHttpAdapter} and the Perplexity
+ * adapter be tested without any real network I/O, by mocking this interface instead of
+ * {@code java.net.http.HttpClient} directly (which has no interface of its own to mock against).
  */
 public interface HttpTransport {
 

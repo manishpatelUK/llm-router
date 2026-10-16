@@ -3,6 +3,7 @@ package io.github.manishpateluk.llmrouter.model;
 import java.util.List;
 import java.util.Map;
 
+import io.github.manishpateluk.llmrouter.config.ThinkingLevel;
 import io.github.manishpateluk.llmrouter.provider.Provider;
 
 import lombok.Builder;
@@ -38,6 +39,26 @@ public class Response {
     /** One entry per candidate tried before success; empty if the first candidate succeeded. */
     @Builder.Default
     List<AttemptRecord> attempts = List.of();
+
+    /**
+     * Attachments left out for the model that answered, one per attachment, in request order —
+     * see {@code LIBRARY_SPEC.md} §4. Empty when every attachment was sent. Whenever this is
+     * non-empty, {@code droppedFeatures} also contains {@code "attachments"}.
+     */
+    @Builder.Default
+    List<DroppedAttachment> droppedAttachments = List.of();
+
+    /**
+     * The thinking level the answering candidate was resolved at: the requested level, or a lower
+     * one when {@code FallbackPolicy.FINISH} stepped down (§5.1.2).
+     */
+    ThinkingLevel thinkingLevel;
+
+    /**
+     * The reasoning control sent to the provider for the answering attempt (§7.4), or {@code null}
+     * if none was sent (the model has none, or {@code RouterConfig.sendThinkingLevel} is off).
+     */
+    ReasoningSettings reasoning;
 
     /** Files the model produced, if any — see {@code LIBRARY_SPEC.md} §4. */
     @Builder.Default

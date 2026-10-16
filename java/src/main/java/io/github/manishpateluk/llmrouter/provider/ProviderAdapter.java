@@ -24,8 +24,9 @@ import io.github.manishpateluk.llmrouter.model.Response;
  * translate it.
  *
  * <p>The {@link Response} an adapter returns is a <em>fragment</em>: {@code content},
- * {@code toolCalls}, {@code usage} (raw token counts only — cost is filled in by the router core
- * from the Model Capability Table), {@code generatedFiles}, and {@code original} are populated;
+ * {@code toolCalls}, {@code usage} (raw token counts; cost is filled in by the router core from
+ * the Model Capability Table, unless the adapter sets the provider's own reported cost in
+ * {@code estimatedCostUsdMicros}/{@code estimatedCostUsdCents}, which the router then keeps),{@code generatedFiles}, and {@code original} are populated;
  * {@code providerUsed}, {@code modelUsed}, {@code attempts}, {@code droppedFeatures}, and
  * {@code structuredOutput} are left at their defaults and filled in by the router core.
  */

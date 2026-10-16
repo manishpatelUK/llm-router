@@ -1,5 +1,6 @@
 package io.github.manishpateluk.llmrouter.provider.compatible;
 
+import tools.jackson.databind.node.ObjectNode;
 import io.github.manishpateluk.llmrouter.provider.Provider;
 
 /** {@link OpenAiCompatibleHttpAdapter} for OpenRouter — no official Java SDK exists. */
@@ -26,11 +27,16 @@ public final class OpenRouterAdapter extends OpenAiCompatibleHttpAdapter {
     }
 
     /**
-     * OpenRouter accepts PDFs and other documents as {@code file} content parts on any model:
-     * natively where the model supports files, otherwise through its own PDF parser.
+     * OpenRouter's unified {@code reasoning} object: {@code {"effort": ...}} or, for a thinking
+     * budget, {@code {"max_tokens": ...}} — never both.
      */
     @Override
-    protected boolean supportsDocumentAttachments() {
-        return true;
+    protected void applyReasoning(ObjectNode body, String effort, Integer budgetTokens) {
+        ObjectNode reasoning = body.putObject("reasoning");
+        if (effort != null) {
+            reasoning.put("effort", effort);
+        } else {
+            reasoning.put("max_tokens", budgetTokens);
+        }
     }
 }

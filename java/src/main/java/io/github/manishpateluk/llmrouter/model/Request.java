@@ -64,4 +64,19 @@ public class Request {
      * to be set directly by callers; set {@code RouterConfig.topP} instead.
      */
     Double topP;
+
+    /**
+     * Resolved during capability negotiation (§7.4) from {@code RouterConfig.thinkingLevel} when
+     * {@code RouterConfig.sendThinkingLevel} is set and the model takes an effort level: the
+     * provider's own effort value, e.g. {@code "high"}. {@code null} sends none. Not intended to be
+     * set directly by callers.
+     */
+    String reasoningEffort;
+
+    /**
+     * As {@link #reasoningEffort}, for a model that takes a thinking-token budget instead: the
+     * budget to send. {@code null} sends none (thinking stays at the provider's default). Not
+     * intended to be set directly by callers.
+     */
+    Integer reasoningBudgetTokens;
 }

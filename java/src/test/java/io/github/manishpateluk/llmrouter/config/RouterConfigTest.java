@@ -21,6 +21,47 @@ class RouterConfigTest {
         assertThat(config.getTemperature()).isNull();
         assertThat(config.getTopP()).isNull();
         assertThat(config.getRequiredFeatures()).isEmpty();
+        assertThat(config.getFallback()).isEqualTo(FallbackPolicy.SAME_DEPTH);
+        assertThat(config.isSendThinkingLevel()).isFalse();
+    }
+
+    @Test
+    void toBuilderChangesOneFieldAndKeepsEveryOther() {
+        RouterConfig original = RouterConfig.builder()
+                .thinkingLevel(ThinkingLevel.HIGH)
+                .costOptimized(true)
+                .structuredOutputStrategy(StructuredOutputStrategy.NATIVE)
+                .temperature(0.3)
+                .requiredFeatures(Set.of(Feature.TOOLS))
+                .fallback(FallbackPolicy.FINISH)
+                .sendThinkingLevel(true)
+                .build();
+
+        RouterConfig lower = original.toBuilder().thinkingLevel(ThinkingLevel.LOW).build();
+
+        assertThat(lower.getThinkingLevel()).isEqualTo(ThinkingLevel.LOW);
+        assertThat(lower.toBuilder().thinkingLevel(ThinkingLevel.HIGH).build()).isEqualTo(original);
+    }
+
+    @Test
+    void fallbackRoundTripsThroughJsonUsingCanonicalWireValues() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+
+        assertThat(mapper.readValue("{\"fallback\": \"finish\", \"sendThinkingLevel\": true}", RouterConfig.class))
+                .satisfies(config -> {
+                    assertThat(config.getFallback()).isEqualTo(FallbackPolicy.FINISH);
+                    assertThat(config.isSendThinkingLevel()).isTrue();
+                });
+        assertThat(mapper.writeValueAsString(FallbackPolicy.SAME_DEPTH)).isEqualTo("\"sameDepth\"");
+        assertThat(mapper.readValue("{}", RouterConfig.class).getFallback()).isEqualTo(FallbackPolicy.SAME_DEPTH);
+    }
+
+    @Test
+    void thinkingLevelsStepDownToLowAndNoFurther() {
+        assertThat(ThinkingLevel.MAX.lower()).isEqualTo(ThinkingLevel.HIGH);
+        assertThat(ThinkingLevel.HIGH.lower()).isEqualTo(ThinkingLevel.MEDIUM);
+        assertThat(ThinkingLevel.MEDIUM.lower()).isEqualTo(ThinkingLevel.LOW);
+        assertThat(ThinkingLevel.LOW.lower()).isNull();
     }
 
     @Test

@@ -1,7 +1,10 @@
 package io.github.manishpateluk.llmrouter;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -17,10 +20,12 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
+import io.github.manishpateluk.llmrouter.config.FallbackPolicy;
 import io.github.manishpateluk.llmrouter.config.Feature;
 import io.github.manishpateluk.llmrouter.config.RouteEntry;
 import io.github.manishpateluk.llmrouter.config.RouterConfig;
 import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
+import io.github.manishpateluk.llmrouter.config.ThinkingLevel;
 import io.github.manishpateluk.llmrouter.error.InvalidConfigException;
 import io.github.manishpateluk.llmrouter.error.InvalidRequestException;
 import io.github.manishpateluk.llmrouter.error.NoProvidersConfiguredException;
@@ -43,10 +48,11 @@ import io.github.manishpateluk.llmrouter.provider.anthropic.AnthropicAdapter;
 import io.github.manishpateluk.llmrouter.provider.compatible.HuggingFaceAdapter;
 import io.github.manishpateluk.llmrouter.provider.compatible.NvidiaAdapter;
 import io.github.manishpateluk.llmrouter.provider.compatible.OpenRouterAdapter;
-import io.github.manishpateluk.llmrouter.provider.compatible.PerplexityAdapter;
 import io.github.manishpateluk.llmrouter.provider.openai.OpenAiAdapter;
+import io.github.manishpateluk.llmrouter.provider.perplexity.PerplexityAdapter;
+import io.github.manishpateluk.llmrouter.routing.RequestEstimator;
 import io.github.manishpateluk.llmrouter.routing.RouteResolver;
-import io.github.manishpateluk.llmrouter.routing.TokenEstimator;
+import io.github.manishpateluk.llmrouter.routing.RouteResolver.Candidate;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -358,29 +364,31 @@ public final class LlmRouter {
     private Response completeVia(Request request, Sender sender) {
         validate(request);
         RouterConfig config = resolveConfig(request);
-        List<RouteEntry> candidates = resolveCandidates(request, config);
+        CandidatePlan plan = new CandidatePlan(request, config);
 
         List<AttemptRecord> attempts = new ArrayList<>();
-        for (RouteEntry candidate : candidates) {
+        for (Candidate resolved = plan.next(); resolved != null; resolved = plan.next()) {
+            RouteEntry candidate = resolved.entry();
+            ThinkingLevel level = resolved.thinkingLevel();
             ProviderAdapter adapter = adapters.get(candidate.getProvider());
             ModelEntry modelEntry = findModel(candidate);
             String schemaProblem = schemaProblem(adapter, candidate, request);
-            String skipReason = skipReason(adapter, candidate, modelEntry, request, config, schemaProblem);
+            String skipReason = skipReason(adapter, resolved, modelEntry, request, config, schemaProblem);
             if (skipReason != null) {
-                attempts.add(recordSkip(candidate, skipReason));
+                attempts.add(recordSkip(candidate, level, skipReason));
                 continue;
             }
 
-            NegotiationResult negotiation = negotiate(candidate, modelEntry, request, config, schemaProblem);
+            NegotiationResult negotiation = negotiate(candidate, level, modelEntry, request, config, schemaProblem);
 
             try {
                 Request toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
                 Response fragment = sender.send(adapter, candidate.getModel(), toSend);
-                return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);
+                return finalizeResponse(request, fragment, resolved, modelEntry, negotiation, attempts);
             } catch (ListenerFailure e) {
                 throw e; // the caller's listener broke, not the provider — never fall back on it
             } catch (RuntimeException e) {
-                attempts.add(recordFailure(candidate, e));
+                attempts.add(recordFailure(candidate, level, e));
             }
         }
 
@@ -433,8 +441,8 @@ public final class LlmRouter {
             return CompletableFuture.failedFuture(e);
         }
         RouterConfig config = resolveConfig(request);
-        List<RouteEntry> candidates = resolveCandidates(request, config);
-        return attemptAsync(request, candidates, 0, new ArrayList<>(), sender);
+        CandidatePlan plan = new CandidatePlan(request, config);
+        return attemptAsync(request, plan, new ArrayList<>(), sender);
     }
 
     /**
@@ -452,62 +460,138 @@ public final class LlmRouter {
     }
 
     private CompletableFuture<Response> attemptAsync(
-            Request request, List<RouteEntry> candidates, int index, List<AttemptRecord> attempts, AsyncSender sender) {
-        if (index >= candidates.size()) {
+            Request request, CandidatePlan plan, List<AttemptRecord> attempts, AsyncSender sender) {
+        Candidate resolved = plan.next();
+        if (resolved == null) {
             log.error("Router exhausted after {} attempt(s)", attempts.size());
             return CompletableFuture.failedFuture(new RouterExhaustedException(attempts));
         }
 
-        RouteEntry candidate = candidates.get(index);
+        RouteEntry candidate = resolved.entry();
+        ThinkingLevel level = resolved.thinkingLevel();
         ProviderAdapter adapter = adapters.get(candidate.getProvider());
         ModelEntry modelEntry = findModel(candidate);
         RouterConfig config = resolveConfig(request);
         String schemaProblem = schemaProblem(adapter, candidate, request);
-        String skipReason = skipReason(adapter, candidate, modelEntry, request, config, schemaProblem);
+        String skipReason = skipReason(adapter, resolved, modelEntry, request, config, schemaProblem);
         if (skipReason != null) {
-            attempts.add(recordSkip(candidate, skipReason));
-            return attemptAsync(request, candidates, index + 1, attempts, sender);
+            attempts.add(recordSkip(candidate, level, skipReason));
+            return attemptAsync(request, plan, attempts, sender);
         }
 
-        NegotiationResult negotiation = negotiate(candidate, modelEntry, request, config, schemaProblem);
+        NegotiationResult negotiation = negotiate(candidate, level, modelEntry, request, config, schemaProblem);
 
         Request toSend;
         try {
             toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
         } catch (RuntimeException e) {
-            attempts.add(recordFailure(candidate, e));
-            return attemptAsync(request, candidates, index + 1, attempts, sender);
+            attempts.add(recordFailure(candidate, level, e));
+            return attemptAsync(request, plan, attempts, sender);
         }
 
         return sender.send(adapter, candidate.getModel(), toSend)
                 .handle((fragment, throwable) -> {
                     if (throwable == null) {
-                        return finalizeResponse(request, fragment, candidate, modelEntry, negotiation, attempts);
+                        return finalizeResponse(request, fragment, resolved, modelEntry, negotiation, attempts);
                     }
                     Throwable cause = unwrap(throwable);
                     if (cause instanceof ListenerFailure listenerFailure) {
                         // the caller's listener broke, not the provider — never fall back on it
                         throw new CompletionException(listenerFailure.listenerException());
                     }
-                    attempts.add(recordFailure(candidate, cause));
+                    attempts.add(recordFailure(candidate, level, cause));
                     return null;
                 })
                 .thenCompose(result -> result != null
                         ? CompletableFuture.completedFuture(result)
-                        : attemptAsync(request, candidates, index + 1, attempts, sender));
+                        : attemptAsync(request, plan, attempts, sender));
     }
 
-    private List<RouteEntry> resolveCandidates(Request request, RouterConfig config) {
-        int promptTokens = TokenEstimator.estimateTokens(request.getPrompt());
-        List<RouteEntry> candidates = RouteResolver.resolve(config, promptTokens, availableProviders(),
-                model -> unmetRequiredFeatures(model, request, config).isEmpty());
-        if (candidates.isEmpty() && config.getRoute() == null) {
-            throw new NoProvidersConfiguredException(
-                    "No provider credentials were detected. Set at least one provider's API key "
-                            + "(see LIBRARY_SPEC.md §6.1) before calling the router.");
+    /**
+     * The candidates one call tries, in order, resolved a thinking level at a time: the whole
+     * route at the requested level first, then — under {@link FallbackPolicy#FINISH}, and only
+     * once those are used up — the route's provider-only entries (or the default route) at each
+     * lower level down to {@code LOW} (§5.1.2). Lower levels are resolved only when reached, and a
+     * provider/model already tried at a higher level isn't tried again. Not thread-safe; one call
+     * walks it in order.
+     */
+    private final class CandidatePlan {
+
+        private final Request request;
+        private final RouterConfig config;
+        private final Deque<Candidate> pending;
+        private final Set<String> seen = new HashSet<>();
+        private ThinkingLevel level;
+
+        CandidatePlan(Request request, RouterConfig config) {
+            this.request = request;
+            this.config = config;
+            this.level = config.getThinkingLevel();
+            List<Candidate> first = resolveAt(level, false);
+            if (first.isEmpty() && config.getRoute() == null) {
+                throw new NoProvidersConfiguredException(
+                        "No provider credentials were detected. Set at least one provider's API key "
+                                + "(see LIBRARY_SPEC.md §6.1) before calling the router.");
+            }
+            this.pending = new ArrayDeque<>(first);
         }
-        log.debug("Resolved {} candidate(s): {}", candidates.size(), candidates);
-        return candidates;
+
+        /** The next candidate to try, or {@code null} once every level allowed has been used up. */
+        Candidate next() {
+            while (true) {
+                Candidate candidate = pending.poll();
+                if (candidate != null) {
+                    if (seen.add(candidate.entry().getProvider() + "/" + candidate.entry().getModel())) {
+                        return candidate;
+                    }
+                    continue;
+                }
+                if (config.getFallback() != FallbackPolicy.FINISH || level.lower() == null) {
+                    return null;
+                }
+                ThinkingLevel exhausted = level;
+                level = level.lower();
+                log.info("Every candidate at thinking level {} failed or was skipped; trying {}", exhausted, level);
+                pending.addAll(resolveAt(level, true));
+            }
+        }
+
+        private List<Candidate> resolveAt(ThinkingLevel at, boolean providerOnly) {
+            List<Candidate> candidates = RouteResolver.resolveCandidates(config, at, availableProviders(),
+                    model -> ineligibleReason(model, request, config),
+                    model -> RequestEstimator.estimatedCostUsd(request, model),
+                    providerOnly);
+            log.debug("Resolved {} candidate(s) at thinking level {}: {}", candidates.size(), at, candidates);
+            return candidates;
+        }
+    }
+
+    /**
+     * Why {@code model} can't serve {@code request} — a required feature it can't honor (§5.4) or
+     * a context window too small for the estimated request (§5.3) — or {@code null} if it can.
+     */
+    private String ineligibleReason(ModelEntry model, Request request, RouterConfig config) {
+        List<Feature> unmet = unmetRequiredFeatures(model, request, config);
+        if (!unmet.isEmpty()) {
+            return "does not support required feature(s) " + unmet;
+        }
+        return contextWindowProblem(model, request);
+    }
+
+    /**
+     * Why {@code request} won't fit {@code model}'s context window, or {@code null} if it will
+     * (§5.3). Never a problem when a {@link RequestInterceptor} is installed: it sees the request
+     * after this check and may shrink it to fit (e.g. by compressing history), so turning the model
+     * away beforehand would be wrong.
+     */
+    private String contextWindowProblem(ModelEntry model, Request request) {
+        if (requestInterceptor != NO_OP_INTERCEPTOR || model.getContextWindowTokens() <= 0) {
+            return null;
+        }
+        int inputTokens = RequestEstimator.inputTokens(request, model);
+        return inputTokens > model.getContextWindowTokens()
+                ? "estimated request (~" + inputTokens + " tokens) exceeds the context window (" + model.getContextWindowTokens() + " tokens)"
+                : null;
     }
 
     private Set<Provider> availableProviders() {
@@ -524,33 +608,36 @@ public final class LlmRouter {
 
     /**
      * Why {@code candidate} must be skipped without being attempted, or {@code null} if it should
-     * be tried: no credentials (§5.1), or it can't honor one of {@code requiredFeatures} (§5.4) —
-     * including a required {@code responseSchema} its adapter can't enforce natively
-     * ({@code schemaProblem}) when there's no prompt fallback. A model missing from the capability
-     * table has no data to check against, so — consistent with how negotiation treats it — it's
-     * otherwise tried optimistically rather than skipped.
+     * be tried: no credentials (§5.1), a context window too small for the request (§5.3), or it
+     * can't honor one of {@code requiredFeatures} (§5.4) — including a required
+     * {@code responseSchema} its adapter can't enforce natively ({@code schemaProblem}) when there's
+     * no prompt fallback. A model missing from the capability table is skipped only when the request
+     * uses a required feature, since there's no data to verify it; otherwise it's tried
+     * optimistically.
      */
-    private static String skipReason(
-            ProviderAdapter adapter, RouteEntry candidate, ModelEntry modelEntry, Request request, RouterConfig config,
+    private String skipReason(
+            ProviderAdapter adapter, Candidate resolved, ModelEntry modelEntry, Request request, RouterConfig config,
             String schemaProblem) {
+        RouteEntry candidate = resolved.entry();
         if (adapter == null || !adapter.isAvailable()) {
             return "no API key detected";
         }
         if (candidate.isProviderOnly()) {
             // RouteResolver leaves a provider-only entry unexpanded only when none of its models qualified.
-            return "no " + candidate.getProvider() + " model supports required feature(s) "
-                    + requiredFeaturesInUse(request, config);
+            return unresolvedReason(resolved, request, config);
         }
-        List<Feature> unmet;
-        if (modelEntry != null) {
-            unmet = CapabilityNegotiator.unmetRequiredFeatures(modelEntry, request, config.getStructuredOutputStrategy(),
-                    config.getRequiredFeatures(), schemaProblem == null);
-        } else {
-            unmet = schemaProblem != null && config.getRequiredFeatures().contains(Feature.RESPONSE_SCHEMA)
-                    && config.getStructuredOutputStrategy() == StructuredOutputStrategy.NATIVE
-                    ? List.of(Feature.RESPONSE_SCHEMA)
-                    : List.of();
+        if (modelEntry == null) {
+            List<Feature> required = requiredFeaturesInUse(request, config);
+            return required.isEmpty()
+                    ? null
+                    : "model is not in the capability table, so required feature(s) " + required + " can't be verified";
         }
+        String contextProblem = contextWindowProblem(modelEntry, request);
+        if (contextProblem != null) {
+            return contextProblem;
+        }
+        List<Feature> unmet = CapabilityNegotiator.unmetRequiredFeatures(modelEntry, request,
+                config.getStructuredOutputStrategy(), config.getRequiredFeatures(), schemaProblem == null);
         if (unmet.isEmpty()) {
             return null;
         }
@@ -558,6 +645,20 @@ public final class LlmRouter {
         return schemaProblem != null && unmet.contains(Feature.RESPONSE_SCHEMA)
                 ? reason + ": can't enforce this responseSchema natively (" + schemaProblem + ")"
                 : reason;
+    }
+
+    /**
+     * The skip reason for a provider-only entry none of whose models qualified: the usual
+     * {@code no <provider> model supports required feature(s) [...]} when every model fell short on
+     * required features alone, otherwise the resolver's list of reasons.
+     */
+    private static String unresolvedReason(Candidate resolved, Request request, RouterConfig config) {
+        Provider provider = resolved.entry().getProvider();
+        boolean featuresAlone = ModelCapabilityTable.listModels(provider).stream()
+                .allMatch(model -> !unmetRequiredFeatures(model, request, config).isEmpty());
+        return featuresAlone
+                ? "no " + provider + " model supports required feature(s) " + requiredFeaturesInUse(request, config)
+                : resolved.unresolvedReason();
     }
 
     /** Why {@code candidate}'s adapter can't enforce the request's {@code responseSchema} natively, or {@code null}. */
@@ -586,7 +687,8 @@ public final class LlmRouter {
     }
 
     private NegotiationResult negotiate(
-            RouteEntry candidate, ModelEntry modelEntry, Request request, RouterConfig config, String schemaProblem) {
+            RouteEntry candidate, ThinkingLevel level, ModelEntry modelEntry, Request request, RouterConfig config,
+            String schemaProblem) {
         if (schemaProblem != null) {
             log.warn("{}/{} can't enforce this responseSchema natively ({}); {}", candidate.getProvider(), candidate.getModel(),
                     schemaProblem, config.getStructuredOutputStrategy() == StructuredOutputStrategy.NATIVE
@@ -599,10 +701,11 @@ public final class LlmRouter {
                     config.getTemperature(), config.getTopP(), schemaProblem == null);
         }
         NegotiationResult result = CapabilityNegotiator.negotiate(modelEntry, request, config.getStructuredOutputStrategy(),
-                config.getTemperature(), config.getTopP(), schemaProblem == null);
+                config.getTemperature(), config.getTopP(), schemaProblem == null, config.isSendThinkingLevel() ? level : null);
         if (!result.getDroppedFeatures().isEmpty()) {
-            log.warn("Dropped features {} for {}/{} due to capability mismatch",
-                    result.getDroppedFeatures(), modelEntry.getProvider(), modelEntry.getModel());
+            log.warn("Dropped features {} for {}/{} due to capability mismatch{}",
+                    result.getDroppedFeatures(), modelEntry.getProvider(), modelEntry.getModel(),
+                    result.getDroppedAttachments().isEmpty() ? "" : "; attachments: " + result.getDroppedAttachments());
         }
         return result;
     }
@@ -610,12 +713,15 @@ public final class LlmRouter {
     private Response finalizeResponse(
             Request originalRequest,
             Response fragment,
-            RouteEntry candidate,
+            Candidate resolved,
             ModelEntry modelEntry,
             NegotiationResult negotiation,
             List<AttemptRecord> priorAttempts) {
 
-        Usage usage = modelEntry == null
+        RouteEntry candidate = resolved.entry();
+        // A cost the provider reported itself (Perplexity's, which includes search fees) wins over the table's estimate.
+        boolean providerReportedCost = fragment.getUsage().getEstimatedCostUsdMicros() > 0;
+        Usage usage = modelEntry == null || providerReportedCost
                 ? fragment.getUsage()
                 : withEstimatedCost(fragment.getUsage(), estimateCostUsd(modelEntry, fragment.getUsage()));
 
@@ -630,11 +736,15 @@ public final class LlmRouter {
                 .usage(usage)
                 .structuredOutput(structuredOutput)
                 .droppedFeatures(negotiation.getDroppedFeatures())
+                .droppedAttachments(negotiation.getDroppedAttachments())
                 .attempts(List.copyOf(priorAttempts))
+                .thinkingLevel(resolved.thinkingLevel())
+                .reasoning(negotiation.getReasoning())
                 .build();
 
-        log.info("Served by {}/{} ({} input, {} output tokens, {} cent(s) estimated)",
-                candidate.getProvider(), candidate.getModel(), usage.getInputTokens(), usage.getOutputTokens(), usage.getEstimatedCostUsdCents());
+        log.info("Served by {}/{} at thinking level {} ({} input, {} output tokens, {} cent(s) estimated)",
+                candidate.getProvider(), candidate.getModel(), resolved.thinkingLevel(), usage.getInputTokens(),
+                usage.getOutputTokens(), usage.getEstimatedCostUsdCents());
         return response;
     }
 
@@ -663,22 +773,32 @@ public final class LlmRouter {
     }
 
     private static AttemptRecord recordSkip(RouteEntry candidate, String reason) {
+        return recordSkip(candidate, null, reason);
+    }
+
+    private static AttemptRecord recordSkip(RouteEntry candidate, ThinkingLevel level, String reason) {
         log.warn("Skipping {}/{}: {}", candidate.getProvider(), candidate.getModel(), reason);
         return AttemptRecord.builder()
                 .provider(candidate.getProvider())
                 .model(candidate.getModel())
                 .outcome(AttemptOutcome.SKIPPED)
                 .reason(reason)
+                .thinkingLevel(level)
                 .build();
     }
 
     private static AttemptRecord recordFailure(RouteEntry candidate, Throwable e) {
+        return recordFailure(candidate, null, e);
+    }
+
+    private static AttemptRecord recordFailure(RouteEntry candidate, ThinkingLevel level, Throwable e) {
         log.error("Attempt failed for {}/{}: {}", candidate.getProvider(), candidate.getModel(), e.getMessage());
         return AttemptRecord.builder()
                 .provider(candidate.getProvider())
                 .model(candidate.getModel())
                 .outcome(AttemptOutcome.FAILED)
                 .reason(e.getMessage())
+                .thinkingLevel(level)
                 .build();
     }
 
@@ -705,6 +825,9 @@ public final class LlmRouter {
         }
         if (config.getRequiredFeatures() == null) {
             throw new InvalidConfigException("RouterConfig.requiredFeatures must not be null");
+        }
+        if (config.getFallback() == null) {
+            throw new InvalidConfigException("RouterConfig.fallback must not be null");
         }
         if (request.getMaxOutputTokens() != null && request.getMaxOutputTokens() <= 0) {
             throw new IllegalArgumentException("Request.maxOutputTokens must be positive when set, was "
