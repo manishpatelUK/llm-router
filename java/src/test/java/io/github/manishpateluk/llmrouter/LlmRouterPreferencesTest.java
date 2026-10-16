@@ -286,10 +286,21 @@ class LlmRouterPreferencesTest {
 
     @Test
     void aBudgetModelGetsABudgetAndItsSamplingIsDroppedAndReported() {
-        RecordingAdapter anthropic = new RecordingAdapter(Provider.ANTHROPIC, "claude-haiku-4-5-20251001");
+        // No seeded model takes a thinking budget any more, so register one shaped like Claude Haiku 4.5.
+        ModelCapabilityTable.registerModel(ModelEntry.builder()
+                .provider(Provider.HUGGINGFACE).model("budget-model")
+                .inputCostPerMillionTokens(1).outputCostPerMillionTokens(5)
+                .thinkingScore(6).speedScore(10)
+                .contextWindowTokens(200_000).maxOutputTokens(64_000)
+                .inputMediaTypes(List.of())
+                .supportsTemperature(true).supportsTopP(true)
+                .reasoningControl(ReasoningControl.BUDGET)
+                .lastUpdated(Instant.parse("2026-10-16T00:00:00Z"))
+                .build());
+        RecordingAdapter anthropic = new RecordingAdapter(Provider.HUGGINGFACE, "budget-model");
         LlmRouter router = new LlmRouter(List.of(anthropic));
         RouterConfig config = RouterConfig.builder()
-                .route(List.of(RouteEntry.of(Provider.ANTHROPIC, "claude-haiku-4-5-20251001")))
+                .route(List.of(RouteEntry.of(Provider.HUGGINGFACE, "budget-model")))
                 .thinkingLevel(ThinkingLevel.HIGH)
                 .sendThinkingLevel(true)
                 .temperature(0.2)

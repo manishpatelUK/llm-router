@@ -140,7 +140,7 @@ class StreamingAdaptersTest {
         assertThat(requestBody.get()).contains("\"stream\":true", "\"include_usage\":true");
     }
 
-    // ---- OpenAI-compatible HTTP adapter (Perplexity, NVIDIA, Hugging Face, OpenRouter) ----
+    // ---- OpenAI-compatible HTTP adapter (NVIDIA, Hugging Face, OpenRouter) ----
 
     @Test
     void compatibleAdapterStreamsTextDeltasAndReadsUsageFromTheFinalChunk() {

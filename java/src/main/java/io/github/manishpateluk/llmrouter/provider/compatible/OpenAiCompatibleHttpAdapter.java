@@ -19,7 +19,6 @@ import tools.jackson.databind.node.ObjectNode;
 import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
 import io.github.manishpateluk.llmrouter.model.Attachment;
-import io.github.manishpateluk.llmrouter.model.Citation;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.Role;
@@ -32,7 +31,7 @@ import io.github.manishpateluk.llmrouter.provider.compatible.HttpTransport.HttpR
 
 /**
  * Shared base for providers with no official Java SDK that expose an OpenAI-compatible
- * chat/completions HTTP endpoint (Perplexity, NVIDIA NIM, Hugging Face, OpenRouter) — see
+ * chat/completions HTTP endpoint (NVIDIA NIM, Hugging Face, OpenRouter) — see
  * {@code MODEL_CAPABILITY_HEURISTICS.md}'s scoping notes and this project's implementation plan
  * for why raw HTTP was chosen over borrowing the official OpenAI SDK against a foreign vendor's
  * API. Subclasses supply only the endpoint URL and, if needed, a non-default auth header shape.
@@ -44,9 +43,9 @@ import io.github.manishpateluk.llmrouter.provider.compatible.HttpTransport.HttpR
  * attachment the router leaves in the request (it drops what the model's capability-table row
  * doesn't accept, §4) goes as a document part — OpenAI's {@code file} part by default, or the
  * provider's own shape via {@link #documentPart}; {@code Response.generatedFiles} is
- * always left empty, since none of these four providers document a file-generation mechanism.
+ * always left empty, since none of these providers document a file-generation mechanism.
  * Unlike {@code AnthropicAdapter}/{@code OpenAiAdapter}, attachments here are always re-embedded
- * inline on every call — none of these four vendors' OpenAI-compatible endpoints share a common,
+ * inline on every call — none of these vendors' OpenAI-compatible endpoints share a common,
  * documented file-upload-and-reference convention this shared base could target generically, so
  * no attempt is made to deduplicate repeated attachment content across calls for them.
  */
@@ -342,50 +341,8 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
                         .reasoningTokens(0)
                         .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                         .build())
-                .citations(parseCitations(root))
                 .original(root)
                 .build();
-    }
-
-    /**
-     * Reads the top-level {@code citations} (source URLs, in the order the answer's {@code [n]}
-     * markers number them) and {@code search_results} (title, url, snippet per source) that
-     * Perplexity adds to its responses. The result follows {@code citations}' order, enriched
-     * from the matching search result; with only {@code search_results}, their order is used.
-     * Providers that send neither get an empty list.
-     */
-    private static List<Citation> parseCitations(JsonNode body) {
-        Map<String, JsonNode> searchResultsByUrl = new LinkedHashMap<>();
-        for (JsonNode result : body.path("search_results")) {
-            String url = result.path("url").asText("");
-            if (!url.isEmpty()) {
-                searchResultsByUrl.putIfAbsent(url, result);
-            }
-        }
-        List<String> urls = new ArrayList<>();
-        for (JsonNode url : body.path("citations")) {
-            if (!url.asText("").isEmpty()) {
-                urls.add(url.asText());
-            }
-        }
-        if (urls.isEmpty()) {
-            urls.addAll(searchResultsByUrl.keySet());
-        }
-        List<Citation> citations = new ArrayList<>();
-        for (String url : urls) {
-            JsonNode result = searchResultsByUrl.get(url);
-            citations.add(Citation.builder()
-                    .url(url)
-                    .title(result == null ? null : nonBlank(result.path("title")))
-                    .snippet(result == null ? null : nonBlank(result.path("snippet")))
-                    .build());
-        }
-        return citations;
-    }
-
-    private static String nonBlank(JsonNode text) {
-        String value = text.asText("");
-        return value.isBlank() ? null : value;
     }
 
     /**
@@ -401,7 +358,6 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         private final Map<Integer, StreamedToolCall> toolCalls = new TreeMap<>();
         private final ArrayNode chunks = MAPPER.createArrayNode();
         private JsonNode usage = MAPPER.missingNode();
-        private List<Citation> citations = List.of();
 
         StreamAccumulator(Consumer<String> onText) {
             this.onText = onText;
@@ -422,10 +378,6 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
             }
             if (chunk.path("usage").isObject()) {
                 usage = chunk.path("usage");
-            }
-            List<Citation> chunkCitations = parseCitations(chunk);
-            if (!chunkCitations.isEmpty()) {
-                citations = chunkCitations; // Perplexity repeats them on chunks; the latest list is the complete one
             }
             JsonNode delta = chunk.path("choices").path(0).path("delta");
             String text = delta.path("content").asText("");
@@ -449,7 +401,6 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
                             .reasoningTokens(0)
                             .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                             .build())
-                    .citations(citations)
                     .original(chunks)
                     .build();
         }

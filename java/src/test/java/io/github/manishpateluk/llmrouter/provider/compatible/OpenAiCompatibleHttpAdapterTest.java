@@ -2,7 +2,6 @@ package io.github.manishpateluk.llmrouter.provider.compatible;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -10,12 +9,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Consumer;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import io.github.manishpateluk.llmrouter.model.Attachment;
-import io.github.manishpateluk.llmrouter.model.Citation;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.ToolDefinition;
@@ -39,10 +36,10 @@ class OpenAiCompatibleHttpAdapterTest {
 
     @Test
     void idAndAvailability() {
-        assertThat(new PerplexityAdapter("key", transport).id()).isEqualTo(Provider.PERPLEXITY);
-        assertThat(new PerplexityAdapter("key", transport).isAvailable()).isTrue();
-        assertThat(new PerplexityAdapter(null, transport).isAvailable()).isFalse();
-        assertThat(new PerplexityAdapter("", transport).isAvailable()).isFalse();
+        assertThat(new NvidiaAdapter("key", transport).id()).isEqualTo(Provider.NVIDIA);
+        assertThat(new NvidiaAdapter("key", transport).isAvailable()).isTrue();
+        assertThat(new NvidiaAdapter(null, transport).isAvailable()).isFalse();
+        assertThat(new NvidiaAdapter("", transport).isAvailable()).isFalse();
     }
 
     @Test
@@ -50,8 +47,8 @@ class OpenAiCompatibleHttpAdapterTest {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("Hello there", 10, 5));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("secret-key", transport);
-        Response response = adapter.send("sonar-pro", Request.builder()
+        NvidiaAdapter adapter = new NvidiaAdapter("secret-key", transport);
+        Response response = adapter.send("some-model", Request.builder()
                 .prompt("Hi")
                 .systemInstructions("Be terse.")
                 .build());
@@ -61,11 +58,11 @@ class OpenAiCompatibleHttpAdapterTest {
         assertThat(response.getUsage().getOutputTokens()).isEqualTo(5);
 
         HttpRequestRecord sent = captor.getValue();
-        assertThat(sent.url()).isEqualTo("https://api.perplexity.ai/chat/completions");
+        assertThat(sent.url()).isEqualTo("https://integrate.api.nvidia.com/v1/chat/completions");
         assertThat(sent.headers()).containsEntry("Authorization", "Bearer secret-key");
 
         JsonNode body = JSON.readTree(sent.jsonBody());
-        assertThat(body.path("model").asText()).isEqualTo("sonar-pro");
+        assertThat(body.path("model").asText()).isEqualTo("some-model");
         assertThat(body.path("messages").get(0).path("role").asText()).isEqualTo("system");
         assertThat(body.path("messages").get(0).path("content").asText()).isEqualTo("Be terse.");
         assertThat(body.path("messages").get(1).path("content").asText()).isEqualTo("Hi");
@@ -76,8 +73,8 @@ class OpenAiCompatibleHttpAdapterTest {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        adapter.send("sonar-pro", Request.builder().prompt("Hi").maxOutputTokens(300).build());
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        adapter.send("some-model", Request.builder().prompt("Hi").maxOutputTokens(300).build());
 
         assertThat(JSON.readTree(captor.getValue().jsonBody()).path("max_tokens").asLong()).isEqualTo(300);
     }
@@ -87,8 +84,8 @@ class OpenAiCompatibleHttpAdapterTest {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        adapter.send("sonar-pro", Request.builder()
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        adapter.send("some-model", Request.builder()
                 .prompt("hi")
                 .tools(List.of(ToolDefinition.builder().name("lookup").description("d").parameters(Map.of("type", "object")).build()))
                 .responseSchema(Map.of("type", "object", "properties", Map.of()))
@@ -104,8 +101,8 @@ class OpenAiCompatibleHttpAdapterTest {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        adapter.send("sonar-pro", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        adapter.send("some-model", Request.builder().prompt("hi").temperature(0.7).topP(0.9).build());
 
         JsonNode body = JSON.readTree(captor.getValue().jsonBody());
         assertThat(body.path("temperature").asDouble()).isEqualTo(0.7);
@@ -117,8 +114,8 @@ class OpenAiCompatibleHttpAdapterTest {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        adapter.send("sonar-pro", Request.builder().prompt("hi").build());
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        adapter.send("some-model", Request.builder().prompt("hi").build());
 
         JsonNode body = JSON.readTree(captor.getValue().jsonBody());
         assertThat(body.has("temperature")).isFalse();
@@ -130,8 +127,8 @@ class OpenAiCompatibleHttpAdapterTest {
         ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
         when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        adapter.send("sonar-pro", Request.builder()
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        adapter.send("some-model", Request.builder()
                 .prompt("describe this")
                 .attachments(List.of(Attachment.builder().mediaType("image/png").data(new byte[]{1, 2, 3}).build()))
                 .build());
@@ -165,24 +162,6 @@ class OpenAiCompatibleHttpAdapterTest {
         assertThat(parts.get(2).path("file").path("file_data").asText()).isEqualTo("data:application/pdf;base64,AQID");
         assertThat(parts.get(3).path("file").path("filename").asText()).isEqualTo("document-2");
         assertThat(parts.get(3).path("file").path("file_data").asText()).startsWith("data:text/csv;base64,");
-    }
-
-    @Test
-    void perplexitySendsDocumentsAsBareBase64FileUrlParts() throws Exception {
-        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
-        when(transport.send(captor.capture())).thenReturn(textResponse("ok", 1, 1));
-
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        adapter.send("sonar-pro", Request.builder()
-                .prompt("read this")
-                .attachments(List.of(Attachment.builder().mediaType("application/pdf").data(new byte[]{1, 2, 3}).filename("a.pdf").build()))
-                .build());
-
-        JsonNode parts = JSON.readTree(captor.getValue().jsonBody()).path("messages").get(0).path("content");
-        assertThat(parts).hasSize(2);
-        assertThat(parts.get(1).path("type").asText()).isEqualTo("file_url");
-        assertThat(parts.get(1).path("file_url").path("url").asText()).isEqualTo("AQID");
-        assertThat(parts.get(1).path("file_name").asText()).isEqualTo("a.pdf");
     }
 
     @Test
@@ -223,27 +202,6 @@ class OpenAiCompatibleHttpAdapterTest {
     }
 
     @Test
-    void perplexityStreamsWithoutAskingForStreamOptionsAndReadsUsageWhereverItAppears() throws Exception {
-        ArgumentCaptor<HttpRequestRecord> captor = ArgumentCaptor.forClass(HttpRequestRecord.class);
-        when(transport.sendStreaming(captor.capture(), any())).thenAnswer(invocation -> {
-            Consumer<String> onLine = invocation.getArgument(1);
-            onLine.accept("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}");
-            onLine.accept("data: [DONE]");
-            return new HttpResponseRecord(200, "");
-        });
-        List<String> deltas = new ArrayList<>();
-
-        Response response = new PerplexityAdapter("key", transport).sendStreaming("sonar", Request.builder().prompt("Hey").build(), deltas::add);
-
-        JsonNode body = JSON.readTree(captor.getValue().jsonBody());
-        assertThat(body.path("stream").asBoolean()).isTrue();
-        assertThat(body.has("stream_options")).isFalse();
-        assertThat(deltas).containsExactly("Hi");
-        assertThat(response.getUsage().getInputTokens()).isEqualTo(3);
-        assertThat(response.getUsage().getOutputTokens()).isEqualTo(1);
-    }
-
-    @Test
     void transportDefaultStreamingReplaysABufferedBodyLineByLine() {
         HttpTransport buffered = request -> new HttpResponseRecord(200, "data: one\n\ndata: two\n");
         HttpTransport failing = request -> new HttpResponseRecord(500, "boom");
@@ -258,46 +216,6 @@ class OpenAiCompatibleHttpAdapterTest {
         assertThat(error.body()).isEqualTo("boom");
     }
 
-    // ---- citations (Perplexity) ----
-
-    @Test
-    void perplexityCitationsFollowTheMarkerOrderAndAreEnrichedFromSearchResults() {
-        when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
-                {
-                  "choices": [{"message": {"content": "Paris is the capital [1], on the Seine [2]."}}],
-                  "citations": ["https://example.org/paris", "https://example.org/seine"],
-                  "search_results": [
-                    {"title": "The Seine", "url": "https://example.org/seine", "date": "2026-01-02", "snippet": "A river in France."},
-                    {"title": "Unrelated", "url": "https://example.org/other"},
-                    {"title": "Paris", "url": "https://example.org/paris", "date": "2025-12-01"}
-                  ],
-                  "usage": {"prompt_tokens": 5, "completion_tokens": 9}
-                }
-                """));
-
-        Response response = new PerplexityAdapter("key", transport).send("sonar", Request.builder().prompt("Capital of France?").build());
-
-        assertThat(response.getCitations()).extracting(Citation::getUrl)
-                .containsExactly("https://example.org/paris", "https://example.org/seine");
-        assertThat(response.getCitations().get(0).getTitle()).isEqualTo("Paris");
-        assertThat(response.getCitations().get(0).getSnippet()).isNull();
-        assertThat(response.getCitations().get(1).getTitle()).isEqualTo("The Seine");
-        assertThat(response.getCitations().get(1).getSnippet()).isEqualTo("A river in France.");
-    }
-
-    @Test
-    void searchResultsAloneBecomeCitationsInTheirOwnOrder() {
-        when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
-                {"choices": [{"message": {"content": "ok"}}],
-                 "search_results": [{"title": "A", "url": "https://a.example"}, {"title": "B", "url": "https://b.example"}]}
-                """));
-
-        Response response = new PerplexityAdapter("key", transport).send("sonar", Request.builder().prompt("q").build());
-
-        assertThat(response.getCitations()).extracting(Citation::getUrl, Citation::getTitle)
-                .containsExactly(tuple("https://a.example", "A"), tuple("https://b.example", "B"));
-    }
-
     @Test
     void aResponseWithoutCitationsHasAnEmptyList() throws Exception {
         when(transport.send(any())).thenReturn(textResponse("plain answer", 1, 1));
@@ -305,27 +223,6 @@ class OpenAiCompatibleHttpAdapterTest {
         Response response = new NvidiaAdapter("key", transport).send("some-model", Request.builder().prompt("q").build());
 
         assertThat(response.getCitations()).isEmpty();
-    }
-
-    @Test
-    void streamedCitationsAreTakenFromTheLatestChunkThatCarriesThem() {
-        when(transport.sendStreaming(any(), any())).thenAnswer(invocation -> {
-            Consumer<String> onLine = invocation.getArgument(1);
-            onLine.accept("data: {\"choices\":[{\"delta\":{\"content\":\"Paris [1]\"}}],\"citations\":[\"https://example.org/paris\"]}");
-            onLine.accept("data: {\"choices\":[{\"delta\":{\"content\":\" and the Seine [2].\"}}],"
-                    + "\"citations\":[\"https://example.org/paris\",\"https://example.org/seine\"],"
-                    + "\"search_results\":[{\"title\":\"The Seine\",\"url\":\"https://example.org/seine\"}]}");
-            onLine.accept("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}");
-            onLine.accept("data: [DONE]");
-            return new HttpResponseRecord(200, "");
-        });
-
-        Response response = new PerplexityAdapter("key", transport).sendStreaming("sonar", Request.builder().prompt("q").build(), text -> { });
-
-        assertThat(response.getContent()).isEqualTo("Paris [1] and the Seine [2].");
-        assertThat(response.getCitations()).extracting(Citation::getUrl)
-                .containsExactly("https://example.org/paris", "https://example.org/seine");
-        assertThat(response.getCitations().get(1).getTitle()).isEqualTo("The Seine");
     }
 
     @Test
@@ -339,8 +236,8 @@ class OpenAiCompatibleHttpAdapterTest {
                 }
                 """));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        Response response = adapter.send("sonar-pro", Request.builder().prompt("lookup something").build());
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        Response response = adapter.send("some-model", Request.builder().prompt("lookup something").build());
 
         assertThat(response.getToolCalls()).hasSize(1);
         assertThat(response.getToolCalls().get(0).getName()).isEqualTo("lookup");
@@ -351,9 +248,9 @@ class OpenAiCompatibleHttpAdapterTest {
     void nonSuccessStatusThrowsProviderHttpException() {
         when(transport.send(any())).thenReturn(new HttpResponseRecord(429, "{\"error\":\"rate limited\"}"));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
 
-        assertThatThrownBy(() -> adapter.send("sonar-pro", Request.builder().prompt("hi").build()))
+        assertThatThrownBy(() -> adapter.send("some-model", Request.builder().prompt("hi").build()))
                 .isInstanceOf(ProviderHttpException.class)
                 .satisfies(e -> assertThat(((ProviderHttpException) e).statusCode()).isEqualTo(429));
     }
@@ -362,14 +259,14 @@ class OpenAiCompatibleHttpAdapterTest {
     void sendAsyncDelegatesToTransportSendAsync() {
         when(transport.sendAsync(any())).thenReturn(CompletableFuture.completedFuture(textResponse("async result", 1, 1)));
 
-        PerplexityAdapter adapter = new PerplexityAdapter("key", transport);
-        CompletableFuture<Response> future = adapter.sendAsync("sonar-pro", Request.builder().prompt("hi").build());
+        NvidiaAdapter adapter = new NvidiaAdapter("key", transport);
+        CompletableFuture<Response> future = adapter.sendAsync("some-model", Request.builder().prompt("hi").build());
 
         assertThat(future.join().getContent()).isEqualTo("async result");
     }
 
     @Test
-    void theOtherThreeCompatibleAdaptersHaveTheirOwnProviderIdAndEndpoint() {
+    void theOtherCompatibleAdaptersHaveTheirOwnProviderIdAndEndpoint() {
         assertThat(new NvidiaAdapter("k", transport).id()).isEqualTo(Provider.NVIDIA);
         assertThat(new HuggingFaceAdapter("k", transport).id()).isEqualTo(Provider.HUGGINGFACE);
         assertThat(new OpenRouterAdapter("k", transport).id()).isEqualTo(Provider.OPENROUTER);

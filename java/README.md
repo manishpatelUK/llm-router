@@ -183,7 +183,7 @@ Response response = router.complete(Request.builder()
 - Anthropic dedupes both images and documents this way, and also tags every attachment content block with an ephemeral `cache_control` hint so Anthropic can reuse the surrounding prompt prefix cheaply.
 - OpenAI dedupes documents only — Chat Completions has no file-id path for images, so image attachments always re-embed inline.
 - It's a pure optimization: if the upload call itself fails for any reason, that attempt transparently falls back to full inline embedding rather than failing your request.
-- The other providers (currently Perplexity, NVIDIA, Hugging Face, OpenRouter) have no equivalent mechanism this library can target generically, so attachments to them are unaffected.
+- The other providers (currently Perplexity, NVIDIA, Hugging Face, OpenRouter) have no equivalent mechanism this library can target generically, so attachments to them are re-sent inline on every call.
 
 See §8.1.1 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md) for the full design rationale.
 
@@ -220,7 +220,7 @@ Response response = router.completeStreaming(request, new StreamListener() {
 // response.getContent() is the full text; tool calls, usage etc. are on the response as usual.
 ```
 
-Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. All six built-in providers stream natively. A custom `ProviderAdapter` that doesn't override `sendStreaming` delivers its text in one piece, so the call works with any adapter. Perplexity reports token usage only if its stream happens to include it, since its API doesn't document an option to ask for it. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
+Everything else is the same as `complete(request)`: routing, negotiation, the interceptor, fallback. All six built-in providers stream natively. A custom `ProviderAdapter` that doesn't override `sendStreaming` delivers its text in one piece, so the call works with any adapter. If your listener itself throws, the call ends with that exception straight away; the router doesn't fall back to another model.
 
 `completeStreamingAsync(request, listener)` is the non-blocking form. It returns a `CompletableFuture<Response>` and follows the same rules. The listener is called from a background thread, one piece at a time and in order, so hand the text to your UI thread if your toolkit requires it:
 
@@ -231,7 +231,7 @@ router.completeStreamingAsync(request, delta -> ui.appendLater(delta))
 
 See §4.2 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
-**Citations.** When a provider reports the sources its answer draws on, they come back on the response, in a provider-neutral shape. Today that's Perplexity, whose models search the web as they answer:
+**Citations.** When a provider reports the sources its answer draws on, they come back on the response, in a provider-neutral shape. Today that's Perplexity: the router switches on Perplexity's web search for every Perplexity call, whichever model it routes to:
 
 ```java
 import io.github.manishpateluk.llmrouter.model.Citation;
@@ -247,10 +247,23 @@ for (int i = 0; i < response.getCitations().size(); i++) {
 }
 ```
 
-- **Numbering.** The list keeps the provider's order, so a `[1]` marker in `getContent()` refers to `getCitations().get(0)`.
+- **Numbering.** The list follows Perplexity's own numbering of its search results, so a `[1]` (or `[web:1]`) marker in `getContent()` refers to `getCitations().get(0)`. Whether the answer carries markers at all is up to the model. `perplexity/sonar` and the presets add them; ask for them in your system instructions if another model leaves them out.
 - **Fields.** `getUrl()` is always set. `getTitle()` and `getSnippet()` are `null` when the provider doesn't give them.
 - **Streaming.** Streamed calls fill `getCitations()` too. Citations arrive on the returned `Response`, not through the listener.
 - **Other providers.** The list is empty for providers that don't report citations.
+
+**Perplexity** runs on its [Agent API](https://docs.perplexity.ai/docs/agent-api/quickstart), which serves Perplexity's own models and other vendors' models through one endpoint. Route entries name a model by its Agent API id:
+
+- **Seeded models.** `perplexity/sonar` (the grounded search model), `perplexity/kimi-k3`, `perplexity/glm-5.3`, `perplexity/glm-5.3-flash` and `perplexity/nemotron-3.5-super-120b-a12b` are in the capability table. A provider-only `RouteEntry.of(Provider.PERPLEXITY)` picks among them like any other provider.
+- **Other vendors through Perplexity.** Ids such as `openai/gpt-6-luna` or `anthropic/claude-sonnet-5-5` work as explicit route entries too. They aren't in the seed table, so register them with `ModelCapabilityTable.registerModel(...)` if you want capability negotiation and cost-ordering for them.
+- **Presets.** `RouteEntry.of(Provider.PERPLEXITY, "preset:fast")` (also `low`, `medium`, `high`, `xhigh`) runs one of Perplexity's [presets](https://docs.perplexity.ai/docs/agent-api/presets). A preset brings its own model, tools and output limit, and has no table row.
+- **Cost.** Perplexity reports each call's actual cost, including its per-search fee (about $0.0025 per search). `getUsage()` carries that figure rather than the table's token-price estimate. Cost-optimized ordering, which happens before the call, still uses the table's token prices only.
+
+**Upgrading from 1.0.x (Perplexity).** Perplexity retired Sonar Chat Completions, so this release moves the adapter to the Agent API. Code that uses only `Provider.PERPLEXITY` without naming a model needs no change. Otherwise:
+
+- `sonar` becomes `perplexity/sonar`. `sonar-pro` and `sonar-reasoning-pro` no longer exist: use `preset:fast` and `preset:low` (Perplexity's own suggested replacements), or a seeded model. The old ids aren't aliased. Perplexity rejects them, and the router falls back to your next route entry.
+- `PerplexityAdapter` moved from `provider.compatible` to `provider.perplexity`. This only matters if you construct adapters yourself.
+- Some Perplexity models now support tools (`perplexity/kimi-k3`, `perplexity/glm-5.3`, `perplexity/glm-5.3-flash`, `perplexity/nemotron-3.5-super-120b-a12b`), so a `requiredFeatures(TOOLS)` route no longer skips Perplexity outright.
 
 **Embeddings**, for semantic search:
 

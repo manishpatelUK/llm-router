@@ -48,8 +48,8 @@ import io.github.manishpateluk.llmrouter.provider.anthropic.AnthropicAdapter;
 import io.github.manishpateluk.llmrouter.provider.compatible.HuggingFaceAdapter;
 import io.github.manishpateluk.llmrouter.provider.compatible.NvidiaAdapter;
 import io.github.manishpateluk.llmrouter.provider.compatible.OpenRouterAdapter;
-import io.github.manishpateluk.llmrouter.provider.compatible.PerplexityAdapter;
 import io.github.manishpateluk.llmrouter.provider.openai.OpenAiAdapter;
+import io.github.manishpateluk.llmrouter.provider.perplexity.PerplexityAdapter;
 import io.github.manishpateluk.llmrouter.routing.RequestEstimator;
 import io.github.manishpateluk.llmrouter.routing.RouteResolver;
 import io.github.manishpateluk.llmrouter.routing.RouteResolver.Candidate;
@@ -719,7 +719,9 @@ public final class LlmRouter {
             List<AttemptRecord> priorAttempts) {
 
         RouteEntry candidate = resolved.entry();
-        Usage usage = modelEntry == null
+        // A cost the provider reported itself (Perplexity's, which includes search fees) wins over the table's estimate.
+        boolean providerReportedCost = fragment.getUsage().getEstimatedCostUsdMicros() > 0;
+        Usage usage = modelEntry == null || providerReportedCost
                 ? fragment.getUsage()
                 : withEstimatedCost(fragment.getUsage(), estimateCostUsd(modelEntry, fragment.getUsage()));
 

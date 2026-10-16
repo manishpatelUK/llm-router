@@ -15,6 +15,8 @@ Design priorities, in order:
 
 Anthropic (Claude), OpenAI, Perplexity, NVIDIA (NIM), Hugging Face, and OpenRouter — each behind a common adapter, so calling code never needs to know which one actually served a request.
 
+Perplexity is called through its Agent API, which replaced Sonar Chat Completions. If your code names Perplexity models (`sonar`, `sonar-pro`, `sonar-reasoning-pro`), see [`CHANGELOG.md`](CHANGELOG.md) for the new ids.
+
 ## Configuring credentials
 
 Every language implementation detects provider credentials from environment variables on first use — no explicit configuration required. For each provider, it checks a library-specific variable first, then falls back to that provider's common one:
@@ -42,6 +44,7 @@ You only need to set the key(s) for whichever provider(s) you actually want to u
 - **`LIBRARY_SPEC.md`** — the language-agnostic design specification. This is the source of truth for what every language implementation should do; each per-language folder implements it in that language's own idiom.
 - **`model-capability-table.json`** — seed data for the router's Model Capability Table (`LIBRARY_SPEC.md` §7): per-model pricing, `thinkingScore`/`speedScore`, context window, capability flags, accepted attachment media types and limits, and reasoning controls, across Anthropic, OpenAI, Perplexity, NVIDIA, and OpenRouter (Hugging Face is intentionally excluded — see below).
 - **`MODEL_CAPABILITY_HEURISTICS.md`** — the methodology behind the numbers in the capability table: data sources, the `thinkingScore`/`speedScore` scoring heuristic, and estimation fallbacks. Read this before hand-editing the table.
+- **`CHANGELOG.md`** — changes that affect callers, with what calling code needs to do. Read this when upgrading.
 - **`ROADMAP.md`** — planned work that isn't implemented yet.
 - **`java/`** — the [Java/Maven implementation](java/README.md).
 - Future language implementations get their own top-level folder alongside `java/`, each with its own `.gitignore`.

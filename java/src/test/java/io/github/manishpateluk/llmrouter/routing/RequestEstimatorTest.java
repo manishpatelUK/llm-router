@@ -60,7 +60,7 @@ class RequestEstimatorTest {
         // Gemini 3: a flat 1,120
         assertThat(RequestEstimator.attachmentTokens(Provider.OPENROUTER, "google/gemini-3.8-flash", png)).isEqualTo(1_120);
         // Others (Perplexity's rate): w * h / 750
-        assertThat(RequestEstimator.attachmentTokens(Provider.PERPLEXITY, "sonar", png)).isEqualTo(1_334);
+        assertThat(RequestEstimator.attachmentTokens(Provider.PERPLEXITY, "perplexity/sonar", png)).isEqualTo(1_334);
     }
 
     @Test
@@ -69,7 +69,7 @@ class RequestEstimatorTest {
 
         assertThat(RequestEstimator.attachmentTokens(Provider.ANTHROPIC, "claude-opus-5-5", threePages)).isEqualTo(3 * 3_800);
         assertThat(RequestEstimator.attachmentTokens(Provider.OPENROUTER, "google/gemini-3.8-flash", threePages)).isEqualTo(3 * 560);
-        assertThat(RequestEstimator.attachmentTokens(Provider.PERPLEXITY, "sonar", threePages)).isEqualTo(3 * 1_000);
+        assertThat(RequestEstimator.attachmentTokens(Provider.PERPLEXITY, "perplexity/sonar", threePages)).isEqualTo(3 * 1_000);
     }
 
     @Test

@@ -115,6 +115,8 @@ Response {
     estimatedCostUsd: int              // converted to cents to avoid floating point issues
     estimatedCostUsdMicros: int        // the same estimate in millionths of a dollar; whole cents round most
                                         // small calls to 0, so sum this one when tracking spend across calls
+                                        // both: the provider's own reported cost when it gives one (Perplexity,
+                                        // including its search fees), else tokens × the table's prices (§7)
   }
   droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
   droppedAttachments: DroppedAttachment[]  // each attachment left out for the answering model, and why (§4); empty if all were sent
@@ -163,7 +165,7 @@ GeneratedFile {
 }
 ```
 
-**Citations.** Adapters map their provider's own citation format onto `Citation`, so callers never parse provider-specific fields. `citations` keeps the provider's order: where `content` carries numbered markers such as `[1]`, marker `[n]` refers to the `n`th citation. For Perplexity, the list follows the response's top-level `citations` (URLs, in marker order), each enriched with the `title` and `snippet` of the matching entry in `search_results`; a response with only `search_results` uses their order. In a streamed call (§4.2) Perplexity repeats these fields on its chunks, so the latest chunk carrying them gives the complete list. Like tool calls, citations arrive on the returned `Response`, not through the stream listener.
+**Citations.** Adapters map their provider's own citation format onto `Citation`, so callers never parse provider-specific fields. `citations` keeps the provider's order: where `content` carries numbered markers such as `[1]`, marker `[n]` refers to the `n`th citation. For Perplexity (Agent API, §8.2), the list is the results of every `search_results` output item, ordered by their `id` (the number an answer's `[n]` or `[web:n]` marker uses, counting from 1), each with its `url`, `title` and `snippet`; any further URLs that appear only as `url_citation` annotations on the answer's text follow. Each URL appears once. In a streamed call (§4.2) the list is taken from the final `response.completed` event. Like tool calls, citations arrive on the returned `Response`, not through the stream listener.
 
 ---
 
@@ -186,7 +188,7 @@ Separately, `Response.generatedFiles` is only ever populated when `ModelEntry.su
 
 Every "dropped" outcome in this table becomes a **skip** instead when the feature is listed in `RouterConfig.requiredFeatures` — see §5.4. For `attachments` that means a model must take **every** attachment in the request to qualify.
 
-**Adapters send what negotiation leaves.** Each adapter sends every attachment it receives in its provider's own wire shape (Anthropic `image`/`document` blocks, with `document` used only for `application/pdf` and `text/plain`; OpenAI `image_url` and `file` parts, `file` for PDF only; Perplexity `file_url` parts; OpenRouter and the other OpenAI-compatible providers OpenAI's `file` part). An attachment type the provider can't take at all fails the attempt rather than being sent in a wrong shape; for models in the table, negotiation has already dropped such attachments (or skipped the candidate when `attachments` is required).
+**Adapters send what negotiation leaves.** Each adapter sends every attachment it receives in its provider's own wire shape (Anthropic `image`/`document` blocks, with `document` used only for `application/pdf` and `text/plain`; OpenAI `image_url` and `file` parts, `file` for PDF only; Perplexity Agent API `input_image` and `input_file` parts, as base64 data URIs; OpenRouter and the other OpenAI-compatible providers OpenAI's `file` part). An attachment type the provider can't take at all fails the attempt rather than being sent in a wrong shape; for models in the table, negotiation has already dropped such attachments (or skipped the candidate when `attachments` is required).
 
 **Reasoning effort.** When `RouterConfig.sendThinkingLevel` is set, negotiation also maps the candidate's thinking level onto its reasoning control (§7.4). A thinking budget (`reasoningControl: "budget"`) switches `temperature` and `topP` off for that attempt — they're omitted and recorded in `droppedFeatures` as if unsupported — because budget-style extended thinking doesn't allow changing them.
 
@@ -243,7 +245,7 @@ Contract:
 - Fallback still applies mid-stream. If an attempt fails after some text has been delivered, `onReset` is called before the router advances to the next candidate, whose text then streams from the beginning. A failure before any text was delivered falls back without a reset.
 - An error raised by the listener itself (from `onText` or `onReset`) is the caller's, not the provider's: it ends the call immediately and reaches the caller unchanged, with no `onReset`, no recorded attempt and no fallback. Treating it as a failed attempt would spend a request on every remaining candidate and end in a misleading exhaustion error.
 - Implementations with an async call style (§11) should offer the streaming call in that style too (`completeStreamingAsync` in Java), with this same contract. Where the async variant runs on another thread, the listener is still called one piece at a time, in order. Whether text arrives in pieces or all at once depends only on the adapter, not on the call style: an adapter without an async streaming path runs its streaming path off the caller's thread (the `sendStreamingAsync` default in §8.1).
-- Only text streams. Tool calls, structured output and usage arrive on the returned `Response` once the attempt completes.
+- Only text streams. Tool calls, structured output and usage arrive on the returned `Response` once the attempt completes. (Perplexity's Agent API streams typed events: the adapter forwards `response.output_text.delta` text and reads tool calls, citations and usage from `response.completed`; a `response.failed` event fails the attempt like an HTTP error.)
 - Every provider supports the call: an adapter without native streaming delivers its whole text in one `onText` call (the `sendStreaming` default in §8.1).
 
 ---
@@ -454,8 +456,8 @@ EmbeddingModelEntry {
 
 `thinkingLevel` always chooses the model (§7.2). With `RouterConfig.sendThinkingLevel: true`, it also reaches the provider, through the chosen model's own reasoning control (`ModelEntry.reasoningControl`). The default is `false`, which leaves every model on its provider's default reasoning, so existing callers see no change.
 
-- **`effort`** — the model takes a named effort (Anthropic `output_config.effort`, OpenAI and most OpenAI-compatible providers `reasoning_effort`, OpenRouter `reasoning.effort`). `low`, `medium` and `high` map to the model's level of the same name in `reasoningEffortLevels`, or the nearest by position when it has none (`low` → the lowest, `medium` → the middle, `high` → the second-highest); `max` always maps to the model's **highest** level (e.g. `xhigh` or `max`).
-- **`budget`** — the model takes a thinking-token budget (Anthropic `thinking.budget_tokens` on models before Claude 4.6). `low` sends none (no extended thinking, the provider default); `medium`, `high` and `max` send 4,096, 16,384 and 32,768 tokens. The budget is capped at half the attempt's output limit (the model's `maxOutputTokens`, or `Request.maxOutputTokens` when lower), so the budget is always below `max_tokens` and the answer keeps room; if that cap is below 1,024 tokens (Anthropic's minimum), no budget is sent. Sending a budget also drops `temperature`/`topP` for the attempt (§4). OpenRouter sends a budget as `reasoning.max_tokens`; providers with no budget convention send none.
+- **`effort`** — the model takes a named effort (Anthropic `output_config.effort`, OpenAI and most OpenAI-compatible providers `reasoning_effort`, OpenRouter and Perplexity's Agent API `reasoning.effort`). `low`, `medium` and `high` map to the model's level of the same name in `reasoningEffortLevels`, or the nearest by position when it has none (`low` → the lowest, `medium` → the middle, `high` → the second-highest); `max` always maps to the model's **highest** level (e.g. `xhigh` or `max`).
+- **`budget`** — the model takes a thinking-token budget (Anthropic `thinking.budget_tokens` on models before Claude 4.6). `low` sends none (no extended thinking, the provider default); `medium`, `high` and `max` send 4,096, 16,384 and 32,768 tokens. The budget is capped at half the attempt's output limit (the model's `maxOutputTokens`, or `Request.maxOutputTokens` when lower), so the budget is always below `max_tokens` and the answer keeps room; if that cap is below 1,024 tokens (Anthropic's minimum), no budget is sent. Sending a budget also drops `temperature`/`topP` for the attempt (§4). OpenRouter sends a budget as `reasoning.max_tokens`; providers with no budget convention (including Perplexity) send none.
 - **`none`** — nothing is sent; the level only chooses the model.
 
 Models missing from the table get no reasoning control. `Response.reasoning` reports what was sent for the attempt that answered, so callers can log it.
@@ -477,6 +479,8 @@ The library must ship with built-in provider adapters for, at minimum:
 
 OpenRouter is itself a router over many upstream vendors' models, addressed by OpenRouter-specific model id strings (typically `vendor/model-name`, e.g. `"anthropic/claude-opus-5"`) — see §12.2. Its Model Capability Table entries (§7) should be populated the same way as any other provider's, and it participates in fallback/cost-optimized ordering identically to the other five; the library does not treat it specially beyond that.
 
+Perplexity is called through its Agent API, which also serves other vendors' models (§8.2). The seed table lists only the models Perplexity hosts itself (`perplexity/*`), for the same reason OpenRouter's rows leave out first-party vendors.
+
 ### 8.1 Provider adapter contract (conceptual)
 
 Each provider is implemented behind a common internal adapter interface so additional providers can be added later without touching router core logic:
@@ -495,7 +499,7 @@ ProviderAdapter {
 }
 ```
 
-Provider adapters are responsible only for translating the unified `Request`/`Response` shapes to/from that provider's wire format. All routing, fallback, capability negotiation, and cost logic lives in the router core and is shared across every provider.
+Provider adapters are responsible only for translating the unified `Request`/`Response` shapes to/from that provider's wire format. All routing, fallback, capability negotiation, and cost logic lives in the router core and is shared across every provider. The one cost exception: an adapter whose provider reports the call's actual cost (Perplexity, §8.2) puts it in the fragment's `usage`, and the router keeps it instead of pricing the tokens from the table.
 
 #### 8.1.1 Attachment reuse across calls (optional adapter-internal optimization)
 
@@ -506,6 +510,27 @@ An adapter implementing this should:
 - Scope the cache to a single adapter instance for a single provider — never share a handle across providers (a fallback from one provider to another must never assume the second provider has seen the file) and never persist it beyond the process, since the public contract gives callers no way to know a handle exists to invalidate.
 - Treat the mechanism as a pure optimization: if the upload/reference step itself fails for any reason, fall back to the provider's normal inline embedding for that one attempt rather than failing the request — a caller must see identical success/failure behavior whether or not this optimization is available for their provider.
 - Not assume every provider supports this — several providers (or several media types on the same provider) may have no such mechanism at all, in which case the adapter simply keeps re-embedding inline as it always has. This is expected to vary a lot by provider and isn't part of the cross-language contract; document per-adapter which media types/providers it applies to.
+
+### 8.2 Perplexity (Agent API)
+
+Perplexity ended Sonar Chat Completions on 27 September 2026. The Perplexity adapter calls the Agent API (`POST https://api.perplexity.ai/v1/agent`) instead. It is not OpenAI-compatible, so it doesn't share the OpenAI-compatible adapters' code.
+
+- **Model ids** are the Agent API's own, in `vendor/model` form: `perplexity/sonar`, `perplexity/kimi-k3`, and also other vendors' models such as `openai/gpt-6-luna` (§12.2). The old ids (`sonar`, `sonar-pro`, `sonar-reasoning-pro`) are gone and are not aliased.
+- **Presets.** A model string `preset:<name>` (e.g. `preset:fast`) is sent as `preset: <name>` instead of `model`. A preset has no table row: it brings its own model, tools and output limit, so `max_output_tokens` is sent only when `Request.maxOutputTokens` is set. Perplexity suggests `preset:fast` in place of `sonar-pro` and `preset:low` in place of `sonar-reasoning-pro`.
+- **Web search is always on.** Every model request includes the `web_search` tool, so Perplexity answers stay grounded in the web as Sonar's were, whichever model serves them. A preset's own tools are left as configured. Search is billed per use on top of tokens.
+- **Request mapping.**
+  - System instructions and `SYSTEM` history turns join into `instructions`.
+  - Other history turns and the prompt go in `input` as `message` items. An assistant turn's `toolCalls` become `function_call` items, and a `TOOL` turn with a `toolCallId` becomes a `function_call_output` item. A `TOOL` turn without one is flattened to a user message.
+  - Images go as `input_image` parts and other attachments as `input_file` parts, both as base64 data URIs. Perplexity allows 30 documents and 50 MiB of inline documents per request.
+  - `responseSchema` goes as `response_format: {type: "json_schema", json_schema: {name, schema}}`, caller tools as `{type: "function", name, description, parameters}`, and effort as `reasoning: {effort}`.
+  - `max_output_tokens` is always sent for a model, because `anthropic/*` models reject requests without it. Its value is the model's table limit, capped by `Request.maxOutputTokens`, or 4,096 for a model the table doesn't list.
+- **Response mapping.**
+  - `content` joins the `output_text` parts of every `message` output item.
+  - `function_call` items become `toolCalls`, with `call_id` as the id.
+  - Citations come from `search_results` items (§3).
+  - `usage` reads `input_tokens`, `output_tokens` and `output_tokens_details.reasoning_tokens`, and `usage.cost.total_cost` becomes the response's cost (§8.1).
+  - A run whose `status` is `failed` or `cancelled` fails the attempt.
+- **Not supported:** `previous_response_id` continuation, background runs, Perplexity's other built-in tools (fetch URL, finance and people search, sandbox, MCP), and replaying a `function_call`'s `thought_signature`, which the unified `ToolCall` has nowhere to keep.
 
 ---
 
@@ -572,7 +597,7 @@ Adding a 6th+ provider later should follow the same convention (lowercase, singl
 
 ### 12.2 Model identifiers
 
-**Not a fixed enum.** `model` is always the literal model identifier string as defined by that provider's own API/docs (e.g. `"claude-opus-5"`, `"gpt-5.1"`, `"llama-3.3-70b-instruct"`). Because the Model Capability Table (§7) is user-mutable and provider lineups change independently of this spec, implementations must not hardcode or validate against a closed set of model strings — only the `provider` field is a closed enum.
+**Not a fixed enum.** `model` is always the literal model identifier string as defined by that provider's own API/docs (e.g. `"claude-opus-5"`, `"gpt-5.1"`, `"llama-3.3-70b-instruct"`, Perplexity's `"perplexity/sonar"`). The one non-literal form is Perplexity's `"preset:<name>"`, which selects an Agent API preset instead of a model (§8.2). Because the Model Capability Table (§7) is user-mutable and provider lineups change independently of this spec, implementations must not hardcode or validate against a closed set of model strings — only the `provider` field is a closed enum.
 
 ### 12.3 `thinkingLevel`
 
@@ -648,7 +673,7 @@ ProviderTool {
 
 ### 13.2 Capability negotiation and fallback
 
-- **Capability data.** `ModelEntry` gains `providerTools: string[]`, the canonical IDs that model supports natively (§7.1). It is a list rather than a boolean per tool so new tool types don't need a schema change. Models with built-in, always-on search (e.g. Perplexity's Sonar models) are *not* listed as supporting `"webSearch"`: the caller can't switch that search on or off, so listing it would let negotiation claim to honor a request it isn't actually controlling. Routing to them for search stays an explicit route choice.
+- **Capability data.** `ModelEntry` gains `providerTools: string[]`, the canonical IDs that model supports natively (§7.1). It is a list rather than a boolean per tool so new tool types don't need a schema change. Models with built-in, always-on search are *not* listed as supporting `"webSearch"`: the caller can't switch that search on or off, so listing it would let negotiation claim to honor a request it isn't actually controlling. Routing to them for search stays an explicit route choice. Perplexity's adapter (§8.2) currently behaves this way, switching on its `web_search` tool for every call. Once `providerTools` exists, its rows could list `"webSearch"` and switch search on only when asked. That would change what a plain Perplexity call does, so it needs a decision of its own.
 - **Per-item dropping.** As with `attachments` (§4), provider tools are independent of each other, so each unsupported one is dropped individually. `droppedFeatures` records `"providerTools"` once (keeping §12.7's field-name granularity), and a new `Response.droppedProviderTools: string[]` lists exactly which canonical IDs were dropped, mirroring `droppedAttachments`.
 - **No emulation.** The router never substitutes its own implementation (it doesn't run a search on the caller's behalf). That would break the library's side-effect-free guarantee (§3), for the same reason prompt-based tool faking is ruled out in §4.
 - **Requiring them.** `"providerTools"` joins §12.9, so `requiredFeatures` can make candidates that lack any requested provider tool skip rather than drop, with the same skip/exhaustion semantics as §5.4. A finer-grained form (requiring `webSearch` but tolerating loss of `webFetch`) is deferred until there's a concrete need.

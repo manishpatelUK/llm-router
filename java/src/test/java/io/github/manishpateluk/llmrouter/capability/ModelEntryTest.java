@@ -76,7 +76,8 @@ class ModelEntryTest {
         ModelEntry opus = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-opus-5-5").orElseThrow();
         assertThat(opus.supportsMediaType("application/pdf")).isTrue();
         assertThat(opus.getReasoningEffortLevels()).containsExactly("low", "medium", "high", "xhigh", "max");
-        ModelEntry haiku = ModelCapabilityTable.findModel(Provider.ANTHROPIC, "claude-haiku-4-5-20251001").orElseThrow();
-        assertThat(haiku.getReasoningControl()).isEqualTo(ReasoningControl.BUDGET);
+        ModelEntry sonar = ModelCapabilityTable.findModel(Provider.PERPLEXITY, "perplexity/sonar").orElseThrow();
+        assertThat(sonar.getReasoningControl()).isEqualTo(ReasoningControl.NONE);
+        assertThat(sonar.getReasoningEffortLevels()).isNullOrEmpty();
     }
 }

@@ -1,6 +1,6 @@
 package io.github.manishpateluk.llmrouter.provider.compatible;
 
-/** Raised when an OpenAI-compatible HTTP adapter's call returns a non-2xx status. */
+/** Raised when a raw-HTTP adapter's call (OpenAI-compatible or Perplexity) returns a non-2xx status. */
 public final class ProviderHttpException extends RuntimeException {
 
     private final int statusCode;
