@@ -29,7 +29,7 @@ far. Remove an item once it ships. Items within a section are roughly in priorit
   Anthropic automatically, with a config switch to turn it off. OpenAI and others cache
   automatically. Report it either way (next item).
 - **Cached and reasoning tokens in `Usage`.** `Usage` has no cached-input count, and
-  `reasoningTokens` isn't filled by the adapters. So cost estimates overstate cached calls and
+  `reasoningTokens` is always 0 except on Perplexity. So cost estimates overstate cached calls and
   understate reasoning-heavy ones. Direction: add `cacheReadTokens` and `cacheWriteTokens`, fill
   all three from each provider's usage block, and add cached-input prices to the capability table
   (§7.1) so `estimatedCostUsd` uses them.
