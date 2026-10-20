@@ -369,6 +369,7 @@ public final class PerplexityAdapter implements ProviderAdapter {
                 .inputTokens(usage.path("input_tokens").asInt(0))
                 .outputTokens(usage.path("output_tokens").asInt(0))
                 .reasoningTokens(usage.path("output_tokens_details").path("reasoning_tokens").asInt(0))
+                .cacheReadTokens(usage.path("input_tokens_details").path("cached_tokens").asInt(0))
                 .estimatedCostUsdCents((int) Math.round(totalCostUsd * 100.0))
                 .estimatedCostUsdMicros(Math.round(totalCostUsd * 1_000_000.0))
                 .build();

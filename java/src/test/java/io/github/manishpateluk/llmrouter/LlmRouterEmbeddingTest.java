@@ -159,6 +159,42 @@ class LlmRouterEmbeddingTest {
         assertThat(usage.getEstimatedCostUsdCents()).isZero();
     }
 
+    @Test
+    void aUsageListenerHearsEmbeddingAttemptsAndTheCall() {
+        List<String> calls = new ArrayList<>();
+        LlmRouterUsageListenerTest.Recorder recorder = new LlmRouterUsageListenerTest.Recorder();
+        LlmRouter router = new LlmRouter(List.of(
+                embedding(Provider.OPENAI, "embed-default", calls, new RuntimeException("rate limited")),
+                embedding(Provider.OPENROUTER, "other-default", calls, null))).withUsageListener(recorder);
+
+        router.embed(EmbeddingRequest.builder().text("x")
+                .route(List.of(RouteEntry.of(Provider.OPENAI), RouteEntry.of(Provider.OPENROUTER))).build());
+
+        assertThat(recorder.attempts).extracting(a -> a.getModel() + ":" + a.getOutcome() + ":" + a.isEmbedding())
+                .containsExactly("embed-default:failed:true", "other-default:success:true");
+        assertThat(recorder.attempts.get(1).getUsage().getInputTokens()).isEqualTo(2);
+        assertThat(recorder.calls).singleElement().satisfies(call -> {
+            assertThat(call.isSucceeded()).isTrue();
+            assertThat(call.isEmbedding()).isTrue();
+            assertThat(call.getModelUsed()).isEqualTo("other-default");
+        });
+    }
+
+    @Test
+    void aUsageListenerHearsAnExhaustedEmbeddingCall() {
+        LlmRouterUsageListenerTest.Recorder recorder = new LlmRouterUsageListenerTest.Recorder();
+        LlmRouter router = new LlmRouter(List.of(
+                embedding(Provider.OPENAI, "embed-default", new ArrayList<>(), new RuntimeException("down")))).withUsageListener(recorder);
+
+        assertThatThrownBy(() -> router.embed(EmbeddingRequest.builder().text("x").build()))
+                .isInstanceOf(RouterExhaustedException.class);
+
+        assertThat(recorder.calls).singleElement().satisfies(call -> {
+            assertThat(call.isSucceeded()).isFalse();
+            assertThat(call.getFailure()).isInstanceOf(RouterExhaustedException.class);
+        });
+    }
+
     /** An embedding adapter whose default model reports a fixed number of input tokens per call. */
     private static ProviderAdapter tokens(Provider id, String defaultModel, int inputTokens) {
         return new ProviderAdapter() {

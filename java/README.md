@@ -121,6 +121,43 @@ RouterConfig resilient = config.toBuilder()
 
 See §5.5 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
+**Prompt caching.** On by default. On Anthropic, the router marks the parts of a request that repeat across calls (system instructions or tools, and the conversation so far) so later calls read them from Anthropic's cache at a tenth of the input price. OpenAI and the other providers cache on their own. `Usage` says what was cached:
+
+```java
+Usage usage = response.getUsage();
+usage.getInputTokens();      // every input token, cached or not
+usage.getCacheReadTokens();  // of which read from the cache
+usage.getCacheWriteTokens(); // of which written to it (Anthropic bills writes at 1.25x the input price)
+usage.getReasoningTokens();  // the part of getOutputTokens() spent reasoning, where the provider says
+```
+
+The cost estimate prices cached tokens at the cache rates. To send no cache markers, set `.promptCaching(false)` on the config. See §4.3 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+
+**Usage listener.** To track spend, tokens or latency without wrapping every call, give the router a `UsageListener`. It hears every attempt (succeeded, failed or skipped) and every call, including async, streaming and embedding calls:
+
+```java
+import io.github.manishpateluk.llmrouter.UsageListener;
+import io.github.manishpateluk.llmrouter.model.AttemptUsage;
+import io.github.manishpateluk.llmrouter.model.CallUsage;
+
+LlmRouter router = new LlmRouter().withUsageListener(new UsageListener() {
+    @Override
+    public void onAttempt(AttemptUsage attempt) {
+        metrics.timer("llm.attempt", "provider", attempt.getProvider().toString(), "outcome", attempt.getOutcome().toString())
+               .record(attempt.getLatency());
+    }
+
+    @Override
+    public void onCall(CallUsage call) {
+        if (call.isSucceeded()) {
+            metrics.counter("llm.cost.micros", "model", call.getModelUsed()).increment(call.getUsage().getEstimatedCostUsdMicros());
+        }
+    }
+});
+```
+
+`withUsageListener` returns a new router that shares the original's adapters and cooldown state; the original stays silent. The listener runs on the thread that finished the attempt, so make it thread-safe and quick. If it throws, the router logs a warning and carries on. See §5.6 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+
 **Async:**
 
 ```java

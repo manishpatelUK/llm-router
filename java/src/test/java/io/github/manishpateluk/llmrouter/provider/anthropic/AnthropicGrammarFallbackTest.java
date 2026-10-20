@@ -70,7 +70,7 @@ class AnthropicGrammarFallbackTest {
         MessageCreateParams retry = sent.getAllValues().get(1);
         assertThat(retry.model().toString()).isEqualTo(MODEL);
         assertThat(retry.outputConfig()).isEmpty();
-        assertThat(retry.system().orElseThrow().asString())
+        assertThat(retry.system().orElseThrow().asTextBlockParams().get(0).text())
                 .startsWith("Be brief.")
                 .contains("Respond with valid JSON only", "\"tags\"");
     }

@@ -226,6 +226,38 @@ class OpenAiCompatibleHttpAdapterTest {
     }
 
     @Test
+    void readsCachedAndReasoningTokensWhenTheProviderSendsThem() {
+        when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
+                {
+                  "choices": [{"message": {"content": "ok"}}],
+                  "usage": {"prompt_tokens": 3000, "completion_tokens": 400,
+                            "prompt_tokens_details": {"cached_tokens": 2048, "cache_write_tokens": 512},
+                            "completion_tokens_details": {"reasoning_tokens": 250}}
+                }
+                """));
+
+        Response response = new OpenRouterAdapter("key", transport).send("some/model", Request.builder().prompt("hi").build());
+
+        assertThat(response.getUsage().getInputTokens()).isEqualTo(3000);
+        assertThat(response.getUsage().getCacheReadTokens()).isEqualTo(2048);
+        assertThat(response.getUsage().getCacheWriteTokens()).isEqualTo(512);
+        assertThat(response.getUsage().getReasoningTokens()).isEqualTo(250);
+    }
+
+    @Test
+    void usageWithoutDetailsReportsNoCachedOrReasoningTokens() {
+        when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
+                {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 8, "completion_tokens": 4}}
+                """));
+
+        Response response = new NvidiaAdapter("key", transport).send("some-model", Request.builder().prompt("hi").build());
+
+        assertThat(response.getUsage().getCacheReadTokens()).isZero();
+        assertThat(response.getUsage().getCacheWriteTokens()).isZero();
+        assertThat(response.getUsage().getReasoningTokens()).isZero();
+    }
+
+    @Test
     void sendMapsToolCallsFromResponse() {
         when(transport.send(any())).thenReturn(new HttpResponseRecord(200, """
                 {

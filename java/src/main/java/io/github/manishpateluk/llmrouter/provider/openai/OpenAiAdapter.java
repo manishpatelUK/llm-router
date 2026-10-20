@@ -478,10 +478,16 @@ public final class OpenAiAdapter implements ProviderAdapter {
 
         int inputTokens = 0;
         int outputTokens = 0;
+        int reasoningTokens = 0;
+        int cacheReadTokens = 0;
         if (completion.usage().isPresent()) {
             CompletionUsage usage = completion.usage().get();
             inputTokens = (int) usage.promptTokens();
             outputTokens = (int) usage.completionTokens();
+            reasoningTokens = (int) usage.completionTokensDetails()
+                    .flatMap(CompletionUsage.CompletionTokensDetails::reasoningTokens).orElse(0L).longValue();
+            cacheReadTokens = (int) usage.promptTokensDetails()
+                    .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens).orElse(0L).longValue();
         }
 
         return Response.builder()
@@ -490,7 +496,8 @@ public final class OpenAiAdapter implements ProviderAdapter {
                 .usage(io.github.manishpateluk.llmrouter.model.Usage.builder()
                         .inputTokens(inputTokens)
                         .outputTokens(outputTokens)
-                        .reasoningTokens(0)
+                        .reasoningTokens(reasoningTokens)
+                        .cacheReadTokens(cacheReadTokens)
                         .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                         .build())
                 .original(completion)

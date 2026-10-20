@@ -43,6 +43,7 @@ class LlmRouterCallSurfaceTest {
         assertThat(config.getMaxRetries()).isZero();
         assertThat(config.getRetryDelay()).isEqualTo(Duration.ofSeconds(1));
         assertThat(config.getCooldown()).isNull();
+        assertThat(config.isPromptCaching()).isTrue();
     }
 
     @Test

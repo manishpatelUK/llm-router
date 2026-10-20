@@ -45,6 +45,7 @@ import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.OutputConfig;
 import com.anthropic.models.messages.PlainTextSource;
 import com.anthropic.models.messages.RawMessageStreamEvent;
+import com.anthropic.models.messages.TextBlockParam;
 import com.anthropic.models.messages.Tool;
 import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
@@ -88,10 +89,8 @@ import org.slf4j.LoggerFactory;
  * on every turn of a multi-turn conversation. The upload cache is keyed by a content hash
  * ({@code mediaType} + bytes) and scoped to this adapter instance — it is never shared across
  * providers or across separate {@code AnthropicAdapter} instances, so this can't leak a stale
- * reference into a fallback attempt on a different provider. Every attachment content block also
- * gets an ephemeral {@code cache_control} hint (whether sent by file reference or inline), which
- * is free to set and helps Anthropic reuse the surrounding prompt prefix cheaply within its
- * caching window. This is a pure optimization, never a correctness dependency: if the upload call
+ * reference into a fallback attempt on a different provider. This is a pure optimization, never a
+ * correctness dependency: if the upload call
  * itself fails for any reason (network blip, permissions, size limits), that one attachment
  * transparently falls back to full inline embedding for the current attempt, and the failure is
  * not cached — the next call retries the upload rather than giving up on the optimization
@@ -99,6 +98,14 @@ import org.slf4j.LoggerFactory;
  * long time and sees a very large number of distinct attachments will grow it unboundedly; fine
  * for the common case (one adapter instance serving one, or a modest number of, conversations)
  * but worth knowing for a long-lived, high-attachment-cardinality server process.
+ *
+ * <p>Prompt caching (§4.3): unless {@code RouterConfig.promptCaching} is off, the request carries
+ * at most two {@code cache_control} breakpoints, well inside Anthropic's limit of four. The first
+ * ends the part that repeats across calls: the system instructions, or the last tool definition
+ * when there are none. The second ends the conversation when there's history, so the next turn
+ * reads everything so far from the cache; without history it ends the attachments, if any. A
+ * prefix shorter than the model's minimum (1,024 tokens or more, depending on the model) simply
+ * isn't cached. Cache writes cost 1.25 times the input price and reads a tenth of it.
  *
  * <p>Schemas too large for Anthropic's strict grammar: Anthropic compiles a {@code responseSchema}
  * into a grammar and rejects one whose grammar is too large (a 400 {@code invalid_request_error}
@@ -114,6 +121,7 @@ public final class AnthropicAdapter implements ProviderAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(AnthropicAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
+    private static final CacheControlEphemeral CACHE_BREAKPOINT = CacheControlEphemeral.builder().build();
     private static final String GRAMMAR_TOO_LARGE = "compiled grammar is too large";
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
@@ -332,9 +340,11 @@ public final class AnthropicAdapter implements ProviderAdapter {
             builder.topP(request.getTopP());
         }
 
+        boolean caching = request.getConfig() == null || request.getConfig().isPromptCaching();
         String system = buildSystemInstructions(request);
         if (system != null) {
-            builder.system(system);
+            TextBlockParam systemBlock = TextBlockParam.builder().text(system).build();
+            builder.systemOfTextBlockParams(List.of(caching ? systemBlock.toBuilder().cacheControl(CACHE_BREAKPOINT).build() : systemBlock));
         }
 
         for (var message : request.getHistory()) {
@@ -346,19 +356,31 @@ public final class AnthropicAdapter implements ProviderAdapter {
             }
         }
 
-        if (request.getAttachments().isEmpty()) {
+        // Breakpoint two: the end of the conversation when there's history, else the end of the attachments.
+        boolean cacheConversation = !request.getHistory().isEmpty();
+        List<Attachment> attachments = request.getAttachments();
+        if (attachments.isEmpty() && !(caching && cacheConversation)) {
             builder.addUserMessage(request.getPrompt());
         } else {
             List<ContentBlockParam> blocks = new ArrayList<>();
-            for (Attachment attachment : request.getAttachments()) {
+            for (Attachment attachment : attachments) {
                 blocks.add(toContentBlockParam(attachment));
             }
             blocks.add(ContentBlockParam.ofText(request.getPrompt()));
+            if (caching) {
+                // the prompt when caching the conversation, otherwise the last attachment
+                int breakpoint = cacheConversation ? blocks.size() - 1 : blocks.size() - 2;
+                blocks.set(breakpoint, withCacheBreakpoint(blocks.get(breakpoint)));
+            }
             builder.addUserMessageOfBlockParams(blocks);
         }
 
-        for (ToolDefinition tool : request.getTools()) {
-            builder.addTool(toAnthropicTool(tool));
+        // Breakpoint one: the system instructions above, or failing those the last tool (tools come first in the prefix).
+        List<ToolDefinition> tools = request.getTools();
+        for (int i = 0; i < tools.size(); i++) {
+            Tool tool = toAnthropicTool(tools.get(i));
+            boolean breakpoint = caching && system == null && i == tools.size() - 1;
+            builder.addTool(breakpoint ? tool.toBuilder().cacheControl(CACHE_BREAKPOINT).build() : tool);
         }
 
         if (request.getResponseSchema() != null || request.getReasoningEffort() != null) {
@@ -499,6 +521,20 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return schema.build();
     }
 
+    /** {@code block} with a prompt-cache breakpoint on it; only text, image and document blocks carry one here. */
+    private static ContentBlockParam withCacheBreakpoint(ContentBlockParam block) {
+        if (block.isText()) {
+            return ContentBlockParam.ofText(block.asText().toBuilder().cacheControl(CACHE_BREAKPOINT).build());
+        }
+        if (block.isImage()) {
+            return ContentBlockParam.ofImage(block.asImage().toBuilder().cacheControl(CACHE_BREAKPOINT).build());
+        }
+        if (block.isDocument()) {
+            return ContentBlockParam.ofDocument(block.asDocument().toBuilder().cacheControl(CACHE_BREAKPOINT).build());
+        }
+        throw new IllegalArgumentException("No prompt-cache breakpoint for this block: " + block);
+    }
+
     private ContentBlockParam toContentBlockParam(Attachment attachment) {
         String mediaType = attachment.getMediaType();
         String normalized = ModelEntry.normalizeMediaType(mediaType);
@@ -506,13 +542,11 @@ public final class AnthropicAdapter implements ProviderAdapter {
         if (!isImage && !normalized.equals("application/pdf") && !normalized.equals("text/plain")) {
             throw new IllegalArgumentException("Anthropic accepts PDF and plain-text documents only, not " + mediaType);
         }
-        CacheControlEphemeral cacheControl = CacheControlEphemeral.builder().build();
-
         String fileId = uploadOrReuseFileId(attachment);
         if (fileId != null) {
             return isImage
-                    ? ContentBlockParam.ofImage(ImageBlockParam.builder().fileSource(fileId).cacheControl(cacheControl).build())
-                    : ContentBlockParam.ofDocument(DocumentBlockParam.builder().fileSource(fileId).cacheControl(cacheControl).build());
+                    ? ContentBlockParam.ofImage(ImageBlockParam.builder().fileSource(fileId).build())
+                    : ContentBlockParam.ofDocument(DocumentBlockParam.builder().fileSource(fileId).build());
         }
 
         // Files API upload unavailable or failed for this attempt — fall back to full inline embedding.
@@ -523,18 +557,18 @@ public final class AnthropicAdapter implements ProviderAdapter {
                             .mediaType(Base64ImageSource.MediaType.of(mediaType))
                             .data(base64Data)
                             .build())
-                    .cacheControl(cacheControl)
+                    
                     .build());
         }
         if (normalized.equals("text/plain")) {
             return ContentBlockParam.ofDocument(DocumentBlockParam.builder()
                     .source(PlainTextSource.builder().data(new String(attachment.getData(), StandardCharsets.UTF_8)).build())
-                    .cacheControl(cacheControl)
+                    
                     .build());
         }
         return ContentBlockParam.ofDocument(DocumentBlockParam.builder()
                 .source(Base64PdfSource.builder().data(base64Data).build())
-                .cacheControl(cacheControl)
+                
                 .build());
     }
 
@@ -587,13 +621,18 @@ public final class AnthropicAdapter implements ProviderAdapter {
             }
         }
 
+        // Anthropic's input_tokens leaves out cached tokens; Usage.inputTokens counts every input token.
+        int cacheRead = (int) message.usage().cacheReadInputTokens().orElse(0L).longValue();
+        int cacheWrite = (int) message.usage().cacheCreationInputTokens().orElse(0L).longValue();
         return Response.builder()
                 .content(content.toString())
                 .toolCalls(toolCalls)
                 .usage(io.github.manishpateluk.llmrouter.model.Usage.builder()
-                        .inputTokens((int) message.usage().inputTokens())
+                        .inputTokens((int) message.usage().inputTokens() + cacheRead + cacheWrite)
                         .outputTokens((int) message.usage().outputTokens())
-                        .reasoningTokens(0)
+                        .reasoningTokens(0) // Anthropic counts thinking in output_tokens without breaking it out
+                        .cacheReadTokens(cacheRead)
+                        .cacheWriteTokens(cacheWrite)
                         .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                         .build())
                 .original(message)

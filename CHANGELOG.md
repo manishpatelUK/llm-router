@@ -5,6 +5,34 @@ anything, calling code needs to do. The full behavior is in [`LIBRARY_SPEC.md`](
 
 ## Unreleased (after Java 1.0.11)
 
+### Prompt caching, cached and reasoning tokens, usage listener
+
+- **Prompt caching on Anthropic** (`LIBRARY_SPEC.md` §4.3). New `RouterConfig.promptCaching`, on by
+  default. The Anthropic adapter now marks the system instructions (or the last tool definition)
+  and, when there's history, the end of the conversation for Anthropic's prompt cache, so agent
+  loops and multi-turn conversations read the repeated prefix at a tenth of the input price.
+  Cache writes cost 1.25 times the input price, so a long prompt that's never reused costs a
+  little more than before. Set `promptCaching(false)` to send no cache markers. OpenAI and the
+  other providers cache on their own, as before.
+- **Fix: five or more attachments on Anthropic.** Every attachment used to carry its own cache
+  marker, and Anthropic rejects more than four in a request. Now only the last attachment does.
+- **`Usage.cacheReadTokens` and `cacheWriteTokens`**, filled from Anthropic, OpenAI, Perplexity
+  and OpenAI-compatible providers (OpenRouter, NVIDIA, Hugging Face) where they report them.
+  **`Usage.reasoningTokens`** is now filled for OpenAI and OpenAI-compatible providers too.
+- **Anthropic `inputTokens` now include cached tokens.** Anthropic reports cached tokens apart from
+  `input_tokens`, and the adapter used to pass that through, so `inputTokens` left them out. It now
+  counts every input token, as it does for every other provider. If you sum Anthropic
+  `inputTokens`, expect higher numbers on calls that hit the cache.
+- **Cached tokens are priced at the cache rates.** New optional table fields
+  `cacheReadCostPerMillionTokens` and `cacheWriteCostPerMillionTokens` (§7.1). Without them,
+  Anthropic rows use 0.1× and 1.25× the input price, and other providers the full input price.
+  So estimates for cached Anthropic calls drop, and others are unchanged until the table has
+  their cache prices.
+- **`UsageListener`** (§5.6). `new LlmRouter().withUsageListener(listener)` reports every attempt
+  (`AttemptUsage`: provider, model, outcome, retries, latency, usage) and every call (`CallUsage`:
+  outcome, who answered, total latency, usage, the attempts, the failure) for sync, async,
+  streaming and embedding calls. A listener that throws is logged and ignored.
+
 ### Timeouts, retries and cooldown
 
 New, optional `RouterConfig` settings (`LIBRARY_SPEC.md` §5.5). All are off by default, so calling

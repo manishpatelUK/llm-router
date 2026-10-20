@@ -294,6 +294,29 @@ class OpenAiAdapterTest {
                 .hasMessageContaining("text/csv");
     }
 
+    @Test
+    void reportsCachedAndReasoningTokensFromTheUsageDetails() {
+        when(client.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completionService);
+        ChatCompletion completion = textCompletion("ok").toBuilder()
+                .usage(CompletionUsage.builder()
+                        .promptTokens(5000)
+                        .completionTokens(300)
+                        .totalTokens(5300)
+                        .promptTokensDetails(CompletionUsage.PromptTokensDetails.builder().cachedTokens(4096).build())
+                        .completionTokensDetails(CompletionUsage.CompletionTokensDetails.builder().reasoningTokens(200).build())
+                        .build())
+                .build();
+        when(completionService.create(any(ChatCompletionCreateParams.class))).thenReturn(completion);
+
+        Response response = new OpenAiAdapter(client).send("gpt-6-astra", Request.builder().prompt("Hi").build());
+
+        assertThat(response.getUsage().getInputTokens()).as("OpenAI's prompt_tokens already include cached ones").isEqualTo(5000);
+        assertThat(response.getUsage().getCacheReadTokens()).isEqualTo(4096);
+        assertThat(response.getUsage().getCacheWriteTokens()).isZero();
+        assertThat(response.getUsage().getReasoningTokens()).isEqualTo(200);
+    }
+
     private static ChatCompletionContentPart firstContentPart(ChatCompletionCreateParams sent) {
         return sent.messages().get(sent.messages().size() - 1).asUser().content().asArrayOfContentParts().get(0);
     }

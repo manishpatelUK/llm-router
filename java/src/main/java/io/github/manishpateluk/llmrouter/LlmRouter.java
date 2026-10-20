@@ -87,10 +87,13 @@ public final class LlmRouter {
     private static final Logger log = LoggerFactory.getLogger(LlmRouter.class);
     private static final ObjectMapper STRUCTURED_OUTPUT_MAPPER = new ObjectMapper();
     private static final RequestInterceptor NO_OP_INTERCEPTOR = (provider, model, request) -> request;
+    private static final UsageListener NO_OP_USAGE_LISTENER = new UsageListener() {
+    };
 
     private final Map<Provider, ProviderAdapter> adapters;
     private final RequestInterceptor requestInterceptor;
     private final Cooldowns cooldowns;
+    private final UsageListener usageListener;
 
     /** Detects credentials from the environment (§6) and builds all six built-in provider adapters. */
     public LlmRouter() {
@@ -136,6 +139,25 @@ public final class LlmRouter {
         this.adapters = Map.copyOf(byProvider);
         this.requestInterceptor = requestInterceptor;
         this.cooldowns = new Cooldowns(clock);
+        this.usageListener = NO_OP_USAGE_LISTENER;
+    }
+
+    private LlmRouter(LlmRouter base, UsageListener usageListener) {
+        this.adapters = base.adapters;
+        this.requestInterceptor = base.requestInterceptor;
+        this.cooldowns = base.cooldowns;
+        this.usageListener = usageListener;
+    }
+
+    /**
+     * A router identical to this one (same adapters, request interceptor and cooldown state)
+     * that reports every attempt and call to {@code usageListener} (§5.6), replacing any listener
+     * this one has. This router is unchanged. Typical use:
+     * {@code new LlmRouter().withUsageListener(metrics)}.
+     */
+    public LlmRouter withUsageListener(UsageListener usageListener) {
+        Objects.requireNonNull(usageListener, "usageListener must not be null");
+        return new LlmRouter(this, usageListener);
     }
 
     private static List<ProviderAdapter> defaultAdapters(CredentialResolver credentials) {
@@ -331,35 +353,40 @@ public final class LlmRouter {
                     .orElseThrow(() -> new NoProvidersConfiguredException(
                             "No configured provider offers embeddings (e.g. set OPENAI_API_KEY)"));
         }
-        List<AttemptRecord> attempts = new ArrayList<>();
+        CallTracker tracker = new CallTracker(usageListener, true);
         for (RouteEntry candidate : candidates) {
             ProviderAdapter adapter = adapters.get(candidate.getProvider());
             if (adapter == null || !adapter.isAvailable()) {
-                attempts.add(recordSkip(candidate, "no credentials"));
+                tracker.skipped(recordSkip(candidate, "no credentials"));
                 continue;
             }
             String model = candidate.getModel() != null ? candidate.getModel() : adapter.defaultEmbeddingModel();
             if (model == null) {
-                attempts.add(recordSkip(candidate, "provider offers no embeddings"));
+                tracker.skipped(recordSkip(candidate, "provider offers no embeddings"));
                 continue;
             }
+            tracker.attemptStarted();
             try {
                 EmbeddingResponse fragment = adapter.embed(model, request.getTexts(), request.getDimensions());
                 if (fragment.getVectors() == null || fragment.getVectors().size() != request.getTexts().size()) {
                     throw new IllegalStateException("expected " + request.getTexts().size() + " vectors, got "
                             + (fragment.getVectors() == null ? 0 : fragment.getVectors().size()));
                 }
-                return fragment.toBuilder()
+                EmbeddingResponse response = fragment.toBuilder()
                         .providerUsed(candidate.getProvider())
                         .modelUsed(model)
                         .usage(priceEmbedding(candidate.getProvider(), model, fragment.getUsage()))
-                        .attempts(List.copyOf(attempts))
+                        .attempts(List.copyOf(tracker.attempts()))
                         .build();
+                tracker.succeeded(candidate.getProvider(), model, null, 0, response.getUsage());
+                return response;
             } catch (RuntimeException e) {
-                attempts.add(recordFailure(RouteEntry.of(candidate.getProvider(), model), e));
+                tracker.failed(recordFailure(RouteEntry.of(candidate.getProvider(), model), e));
             }
         }
-        throw new RouterExhaustedException(attempts);
+        RouterExhaustedException exhausted = new RouterExhaustedException(tracker.attempts());
+        tracker.callFailed(exhausted);
+        throw exhausted;
     }
 
     /**
@@ -387,8 +414,18 @@ public final class LlmRouter {
         RouterConfig config = resolveConfig(request);
         CallDeadline deadline = CallDeadline.start(config.getCallTimeout());
         CandidatePlan plan = new CandidatePlan(request, config);
+        CallTracker tracker = new CallTracker(usageListener, false);
+        try {
+            return completeVia(request, config, plan, deadline, tracker, sender);
+        } catch (RuntimeException e) {
+            tracker.callFailed(e instanceof ListenerFailure listenerFailure ? listenerFailure.listenerException() : e);
+            throw e;
+        }
+    }
 
-        List<AttemptRecord> attempts = new ArrayList<>();
+    private Response completeVia(
+            Request request, RouterConfig config, CandidatePlan plan, CallDeadline deadline, CallTracker tracker, Sender sender) {
+        List<AttemptRecord> attempts = tracker.attempts();
         for (Candidate resolved = plan.next(); resolved != null; resolved = plan.next()) {
             if (deadline.expired()) {
                 return throwCallTimedOut(deadline, attempts);
@@ -400,17 +437,18 @@ public final class LlmRouter {
             String schemaProblem = schemaProblem(adapter, candidate, request);
             String skipReason = skipReason(adapter, resolved, modelEntry, request, config, schemaProblem);
             if (skipReason != null) {
-                attempts.add(recordSkip(candidate, level, skipReason));
+                tracker.skipped(recordSkip(candidate, level, skipReason));
                 continue;
             }
 
             NegotiationResult negotiation = negotiate(candidate, level, modelEntry, request, config, schemaProblem);
 
+            tracker.attemptStarted();
             Request toSend;
             try {
                 toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
             } catch (RuntimeException e) {
-                attempts.add(recordFailure(candidate, level, e, 0));
+                tracker.failed(recordFailure(candidate, level, e, 0));
                 continue;
             }
 
@@ -418,13 +456,15 @@ public final class LlmRouter {
                 try {
                     Response fragment = sender.send(adapter, candidate.getModel(), toSend, deadline.limitFor(config.getAttemptTimeout()));
                     recordSuccess(config, candidate);
-                    return finalizeResponse(request, fragment, resolved, modelEntry, negotiation, attempts);
+                    Response response = finalizeResponse(request, fragment, resolved, modelEntry, negotiation, attempts);
+                    tracker.succeeded(candidate.getProvider(), candidate.getModel(), level, retries, response.getUsage());
+                    return response;
                 } catch (ListenerFailure e) {
                     throw e; // the caller's listener broke, not the provider — never fall back on it
                 } catch (RuntimeException e) {
                     Duration delay = retryDelay(adapter, candidate, e, retries, config, deadline);
                     if (delay == null || !sleep(delay)) {
-                        attempts.add(recordFailure(candidate, level, e, retries));
+                        tracker.failed(recordFailure(candidate, level, e, retries));
                         recordFailure(config, candidate);
                         break;
                     }
@@ -600,7 +640,12 @@ public final class LlmRouter {
         RouterConfig config = resolveConfig(request);
         CallDeadline deadline = CallDeadline.start(config.getCallTimeout());
         CandidatePlan plan = new CandidatePlan(request, config);
-        return attemptAsync(request, plan, new ArrayList<>(), sender, deadline);
+        CallTracker tracker = new CallTracker(usageListener, false);
+        return attemptAsync(request, plan, tracker, sender, deadline).whenComplete((response, throwable) -> {
+            if (throwable != null) {
+                tracker.callFailed(unwrap(throwable));
+            }
+        });
     }
 
     /**
@@ -618,7 +663,8 @@ public final class LlmRouter {
     }
 
     private CompletableFuture<Response> attemptAsync(
-            Request request, CandidatePlan plan, List<AttemptRecord> attempts, AsyncSender sender, CallDeadline deadline) {
+            Request request, CandidatePlan plan, CallTracker tracker, AsyncSender sender, CallDeadline deadline) {
+        List<AttemptRecord> attempts = tracker.attempts();
         Candidate resolved = deadline.expired() ? null : plan.next();
         if (resolved == null) {
             try {
@@ -640,25 +686,28 @@ public final class LlmRouter {
         String schemaProblem = schemaProblem(adapter, candidate, request);
         String skipReason = skipReason(adapter, resolved, modelEntry, request, config, schemaProblem);
         if (skipReason != null) {
-            attempts.add(recordSkip(candidate, level, skipReason));
-            return attemptAsync(request, plan, attempts, sender, deadline);
+            tracker.skipped(recordSkip(candidate, level, skipReason));
+            return attemptAsync(request, plan, tracker, sender, deadline);
         }
 
         NegotiationResult negotiation = negotiate(candidate, level, modelEntry, request, config, schemaProblem);
 
+        tracker.attemptStarted();
         Request toSend;
         try {
             toSend = requestInterceptor.beforeSend(candidate.getProvider(), candidate.getModel(), negotiation.getAdaptedRequest());
         } catch (RuntimeException e) {
-            attempts.add(recordFailure(candidate, level, e, 0));
-            return attemptAsync(request, plan, attempts, sender, deadline);
+            tracker.failed(recordFailure(candidate, level, e, 0));
+            return attemptAsync(request, plan, tracker, sender, deadline);
         }
 
         return sendWithRetriesAsync(adapter, candidate, toSend, sender, config, deadline, 0)
-                .handle((fragment, throwable) -> {
+                .handle((sent, throwable) -> {
                     if (throwable == null) {
                         recordSuccess(config, candidate);
-                        return finalizeResponse(request, fragment, resolved, modelEntry, negotiation, attempts);
+                        Response response = finalizeResponse(request, sent.response(), resolved, modelEntry, negotiation, attempts);
+                        tracker.succeeded(candidate.getProvider(), candidate.getModel(), level, sent.retries(), response.getUsage());
+                        return response;
                     }
                     Throwable cause = unwrap(throwable);
                     if (cause instanceof ListenerFailure listenerFailure) {
@@ -666,21 +715,21 @@ public final class LlmRouter {
                         throw new CompletionException(listenerFailure.listenerException());
                     }
                     FailedAfterRetries failed = (FailedAfterRetries) cause;
-                    attempts.add(recordFailure(candidate, level, failed.getCause(), failed.retries));
+                    tracker.failed(recordFailure(candidate, level, failed.getCause(), failed.retries));
                     recordFailure(config, candidate);
                     return null;
                 })
                 .thenCompose(result -> result != null
                         ? CompletableFuture.completedFuture(result)
-                        : attemptAsync(request, plan, attempts, sender, deadline));
+                        : attemptAsync(request, plan, tracker, sender, deadline));
     }
 
     /**
      * Sends one async attempt, retrying transient failures per {@code RouterConfig.maxRetries}
-     * (§5.5). Fails with {@link FailedAfterRetries} once it gives up, or with the
-     * {@link ListenerFailure} unchanged.
+     * (§5.5). Completes with the response and the retries it took; fails with
+     * {@link FailedAfterRetries} once it gives up, or with the {@link ListenerFailure} unchanged.
      */
-    private CompletableFuture<Response> sendWithRetriesAsync(
+    private CompletableFuture<Sent> sendWithRetriesAsync(
             ProviderAdapter adapter, RouteEntry candidate, Request toSend, AsyncSender sender, RouterConfig config,
             CallDeadline deadline, int retries) {
         CompletableFuture<Response> sent;
@@ -691,19 +740,23 @@ public final class LlmRouter {
         }
         return sent.handle((fragment, throwable) -> {
             if (throwable == null) {
-                return CompletableFuture.completedFuture(fragment);
+                return CompletableFuture.completedFuture(new Sent(fragment, retries));
             }
             Throwable cause = unwrap(throwable);
             if (cause instanceof ListenerFailure) {
-                return CompletableFuture.<Response>failedFuture(cause);
+                return CompletableFuture.<Sent>failedFuture(cause);
             }
             Duration delay = retryDelay(adapter, candidate, cause, retries, config, deadline);
             if (delay == null) {
-                return CompletableFuture.<Response>failedFuture(new FailedAfterRetries(cause, retries));
+                return CompletableFuture.<Sent>failedFuture(new FailedAfterRetries(cause, retries));
             }
             return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(delay.toNanos(), TimeUnit.NANOSECONDS))
                     .thenCompose(ignored -> sendWithRetriesAsync(adapter, candidate, toSend, sender, config, deadline, retries + 1));
         }).thenCompose(future -> future);
+    }
+
+    /** An async attempt's response, and the retries it took. */
+    private record Sent(Response response, int retries) {
     }
 
     /** Carries an async attempt's final failure, and the retries made before it, out of {@link #sendWithRetriesAsync}. */
@@ -967,14 +1020,18 @@ public final class LlmRouter {
                 .reasoning(negotiation.getReasoning())
                 .build();
 
-        log.info("Served by {}/{} at thinking level {} ({} input, {} output tokens, {} cent(s) estimated)",
+        log.info("Served by {}/{} at thinking level {} ({} input ({} cached), {} output tokens, {} cent(s) estimated)",
                 candidate.getProvider(), candidate.getModel(), resolved.thinkingLevel(), usage.getInputTokens(),
-                usage.getOutputTokens(), usage.getEstimatedCostUsdCents());
+                usage.getCacheReadTokens(), usage.getOutputTokens(), usage.getEstimatedCostUsdCents());
         return response;
     }
 
-    private static double estimateCostUsd(ModelEntry model, Usage usage) {
-        double inputCost = (usage.getInputTokens() / 1_000_000.0) * model.getInputCostPerMillionTokens();
+    /** Prices {@code usage} against {@code model}'s row, charging cached input at the cache rates (§7.1). */
+    static double estimateCostUsd(ModelEntry model, Usage usage) {
+        int uncachedInput = Math.max(0, usage.getInputTokens() - usage.getCacheReadTokens() - usage.getCacheWriteTokens());
+        double inputCost = (uncachedInput / 1_000_000.0) * model.getInputCostPerMillionTokens()
+                + (usage.getCacheReadTokens() / 1_000_000.0) * model.effectiveCacheReadCostPerMillionTokens()
+                + (usage.getCacheWriteTokens() / 1_000_000.0) * model.effectiveCacheWriteCostPerMillionTokens();
         double outputCost = (usage.getOutputTokens() / 1_000_000.0) * model.getOutputCostPerMillionTokens();
         return inputCost + outputCost;
     }

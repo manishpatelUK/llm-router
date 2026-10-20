@@ -14,7 +14,7 @@ import lombok.extern.jackson.Jacksonized;
  * deliberately not rebuilt per request.
  *
  * <p>{@code thinkingLevel}, {@code costOptimized}, {@code structuredOutputStrategy},
- * {@code requiredFeatures}, {@code fallback}, {@code sendThinkingLevel}, {@code maxRetries} and {@code retryDelay} always carry their spec-defined default when not explicitly set, so
+ * {@code requiredFeatures}, {@code fallback}, {@code sendThinkingLevel}, {@code maxRetries}, {@code retryDelay} and {@code promptCaching} always carry their spec-defined default when not explicitly set, so
  * downstream routing code never needs to null-check them. {@code route} is the one field that stays {@code null} by default —
  * unlike the others, "no route given" resolves dynamically from available providers (§5.2)
  * rather than to a fixed value, so a {@code RouterConfig.builder().build()} with no other
@@ -115,4 +115,13 @@ public class RouterConfig {
      * (the default) switches cooldown off.
      */
     CooldownPolicy cooldown;
+
+    /**
+     * Marks the parts of a request that repeat across calls (system instructions, tool
+     * definitions, earlier conversation, attachments) for the provider's prompt cache, where the
+     * provider needs telling (§4.3). On by default. Today only Anthropic needs it; OpenAI and the
+     * others cache on their own, whatever this says. {@code false} sends no cache markers at all.
+     */
+    @Builder.Default
+    boolean promptCaching = true;
 }

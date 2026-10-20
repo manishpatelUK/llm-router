@@ -109,14 +109,17 @@ Response {
   providerUsed: string                 // canonical provider ID, §12.1 (e.g. "anthropic")
   modelUsed: string                    // provider-defined model id, §12.2 (e.g. "claude-opus-5")
   usage: {
-    inputTokens: int
-    outputTokens: int
-    reasoningTokens: int
+    inputTokens: int                   // every input token, including those read from or written to the prompt cache
+    outputTokens: int                  // including any reasoning tokens
+    reasoningTokens: int               // the part of outputTokens spent on reasoning, where reported; else 0
+    cacheReadTokens: int               // the part of inputTokens read from the provider's prompt cache (§4.3); else 0
+    cacheWriteTokens: int              // the part of inputTokens written to the prompt cache, where billed separately (§4.3); else 0
     estimatedCostUsd: int              // converted to cents to avoid floating point issues
     estimatedCostUsdMicros: int        // the same estimate in millionths of a dollar; whole cents round most
                                         // small calls to 0, so sum this one when tracking spend across calls
                                         // both: the provider's own reported cost when it gives one (Perplexity,
-                                        // including its search fees), else tokens × the table's prices (§7)
+                                        // including its search fees), else tokens × the table's prices (§7),
+                                        // with cached input at the cache prices (§7.1)
   }
   droppedFeatures: string[]            // values per §12.7 (e.g. ["responseSchema", "tools"]) if the chosen model couldn't support them
   droppedAttachments: DroppedAttachment[]  // each attachment left out for the answering model, and why (§4); empty if all were sent
@@ -249,6 +252,19 @@ Contract:
 - Only text streams. Tool calls, structured output and usage arrive on the returned `Response` once the attempt completes. (Perplexity's Agent API streams typed events: the adapter forwards `response.output_text.delta` text and reads tool calls, citations and usage from `response.completed`; a `response.failed` event fails the attempt like an HTTP error.)
 - Every provider supports the call: an adapter without native streaming delivers its whole text in one `onText` call (the `sendStreaming` default in §8.1).
 
+### 4.3 Prompt caching
+
+Providers bill input tokens they've seen recently at a discount, when the request starts with the same content (the "prefix") as an earlier one. Agent loops and multi-turn conversations resend their system instructions, tool definitions and history every turn, so caching that prefix saves most of the input cost. With `RouterConfig.promptCaching` on (the default), the adapter does whatever its provider needs to cache the parts of a request that repeat across calls:
+
+- **Providers that cache on their own** (OpenAI, and most OpenAI-compatible providers) need nothing. `promptCaching: false` can't turn their caching off.
+- **Providers that need marking** (Anthropic) get cache breakpoints. The prefix order is tools, then system instructions, then messages. The adapter marks the end of the part that repeats across calls (the system instructions, or the last tool definition when there are none), and then:
+  - with history, the end of the request, so the next turn reads the whole conversation so far from the cache;
+  - without history, the end of the attachments, if any.
+
+  That's at most two breakpoints, within Anthropic's limit of four. A prefix shorter than the model's minimum isn't cached, and costs nothing extra. Writing to the cache costs more than plain input (1.25× on Anthropic), and reading costs much less (0.1×), so caching pays for itself from the first reuse.
+
+With `promptCaching: false`, nothing is marked. Either way, `Usage.cacheReadTokens` and `cacheWriteTokens` report what the provider says it cached, and the cost estimate prices them at the cache rates (§7.1).
+
 ---
 
 ## 5. `RouterConfig`
@@ -271,6 +287,7 @@ RouterConfig {
   maxRetries: int?                  // default 0 — retries of a transient failure on the same model before falling back (§5.5)
   retryDelay: duration?             // default 1s — the wait before the first retry, doubled for each one after (§5.5)
   cooldown: CooldownPolicy?         // no default (off) — skip a model on later calls after repeated failures (§5.5)
+  promptCaching: boolean?           // default true — mark repeated parts of the request for the provider's prompt cache (§4.3)
 }
 
 CooldownPolicy {
@@ -369,6 +386,46 @@ All retrying is the router's, so `maxRetries` is the whole story: an adapter bui
 
 Embedding calls (§3.2) take no `RouterConfig`, so none of this applies to them.
 
+### 5.6 Usage listener
+
+A router can be given a listener that hears about every attempt and every call, for metrics, spend tracking or logs, without wrapping each call site. It's set on the router, not on `RouterConfig`, since it's about where reports go, not how a call is routed.
+
+```
+UsageListener {
+  onAttempt(attempt: AttemptUsage)   // optional; once per candidate tried or skipped, in order
+  onCall(call: CallUsage)            // optional; once when the call ends, succeeded or failed
+}
+
+AttemptUsage {
+  provider: string
+  model: string
+  outcome: string                    // "success" | "failed" | "skipped" (§12.6)
+  reason: string?                    // the error or skip reason, as in AttemptRecord; null on success
+  thinkingLevel: ThinkingLevel?      // null for embeddings
+  retries: int                       // §5.5
+  latency: duration                  // just before the request went to the provider until its outcome, including
+                                     // retries and the waits between them; zero for a skipped candidate
+  usage: Usage?                      // tokens and estimated cost on success; null otherwise
+  embedding: boolean
+}
+
+CallUsage {
+  succeeded: boolean
+  providerUsed: string?              // null when the call failed
+  modelUsed: string?
+  latency: duration                  // from the start of routing until the call ended
+  usage: Usage?                      // the answering attempt's; null when the call failed
+  attempts: AttemptUsage[]           // every candidate tried or skipped, the answering one last
+  failure: error?                    // what the caller got; null on success
+  embedding: boolean
+}
+```
+
+- It covers completions in every call style (sync, async, streaming) and embeddings (§3.2). A call that fails before routing starts (an invalid request, or no provider credentials at all) isn't reported.
+- A failed attempt reports no `usage`, even if the provider billed for part of it, since providers don't report usage on failure.
+- When a stream listener (§4.2) breaks the call, `onCall` reports the listener's error as the failure.
+- The listener is called on whatever thread finished the attempt, so one shared across calls must be thread-safe. The call waits for it, so it should return quickly. An error it raises is logged and ignored: a broken listener never fails a call.
+
 ---
 
 ## 6. Environment & Credential Detection
@@ -417,6 +474,8 @@ ModelEntry {
   model: string                 // provider-defined model id, §12.2 — not a library-level enum
   inputCostPerMillionTokens: float
   outputCostPerMillionTokens: float
+  cacheReadCostPerMillionTokens: float?   // input read from the prompt cache (§4.3); null = the provider's usual rate (below)
+  cacheWriteCostPerMillionTokens: float?  // input written to the prompt cache; null = the provider's usual rate (below)
   thinkingScore: number        // 0-10, relative reasoning/capability strength within this table
   speedScore: number           // 0-10, relative latency/throughput (higher = faster)
   contextWindowTokens: int
@@ -435,6 +494,8 @@ ModelEntry {
   lastUpdated: string          // ISO 8601 UTC timestamp, e.g. "2026-09-14T13:09:08Z" — when this specific row was last verified/updated
 }
 ```
+
+When a row has no cache prices, Anthropic rows use Anthropic's published rates for every model, 0.1× the input price for reads and 1.25× for writes (its default five-minute cache). Other providers' discounts vary by model, so their rows use the full input price until the table gives a cache price. That overstates the cost of a cached call rather than understating it.
 
 `supportsVision` and `supportsFileInput` are no longer stored; implementations keep them readable for compatibility, derived from `inputMediaTypes` (any `image/*` type; any other type). A row registered the older way, with those two booleans and no `inputMediaTypes`, keeps their old meaning: any `image/*` when `supportsVision`, any other type when `supportsFileInput`.
 
@@ -531,6 +592,8 @@ ProviderAdapter {
 }
 ```
 
+Adapters fill `usage` so that `inputTokens` counts every input token, cached or not, and `cacheReadTokens`/`cacheWriteTokens` are the cached parts, whatever the provider's own convention (Anthropic reports cached tokens separately from `input_tokens`; OpenAI includes them in `prompt_tokens`). An adapter built on a provider SDK that retries on its own turns that off, so `maxRetries` (§5.5) is the only retry setting.
+
 Provider adapters are responsible only for translating the unified `Request`/`Response` shapes to/from that provider's wire format. All routing, fallback, capability negotiation, and cost logic lives in the router core and is shared across every provider. The one cost exception: an adapter whose provider reports the call's actual cost (Perplexity, §8.2) puts it in the fragment's `usage`, and the router keeps it instead of pricing the tokens from the table.
 
 #### 8.1.1 Attachment reuse across calls (optional adapter-internal optimization)
@@ -571,7 +634,7 @@ Perplexity ended Sonar Chat Completions on 27 September 2026. The Perplexity ada
 The library integrates with each language's idiomatic logging facility (e.g. SLF4J for Java, standard `logging` module for Python, a common structured logger for Node/TypeScript) rather than inventing its own. Standard levels apply:
 
 - **DEBUG**: resolved route/candidate list for a call, per-attempt request payload shape (not full content by default — avoid leaking prompts at non-debug levels), capability-negotiation decisions.
-- **INFO**: which provider/model was ultimately used, token usage/cost summary per call.
+- **INFO**: which provider/model was ultimately used, token usage/cost summary per call. For metrics, use the usage listener (§5.6) rather than parsing logs.
 - **WARN**: a candidate was skipped (no credentials) or a feature was dropped due to capability mismatch.
 - **ERROR**: an attempt failed (with provider/model and error detail); router exhaustion.
 

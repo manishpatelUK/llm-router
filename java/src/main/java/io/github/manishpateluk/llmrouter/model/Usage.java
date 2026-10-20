@@ -10,9 +10,29 @@ import lombok.extern.jackson.Jacksonized;
 @Jacksonized
 public class Usage {
 
+    /** Every input token the model read, including the ones served from or written to the provider's prompt cache. */
     int inputTokens;
+
+    /** Output tokens, including any reasoning tokens. */
     int outputTokens;
+
+    /**
+     * The part of {@code outputTokens} spent on reasoning, where the provider reports it (OpenAI,
+     * Perplexity and OpenAI-compatible providers that return it); 0 when it isn't reported.
+     */
     int reasoningTokens;
+
+    /**
+     * The part of {@code inputTokens} read from the provider's prompt cache (§4.3), which is billed
+     * at a discount; 0 when nothing was cached or the provider doesn't report it.
+     */
+    int cacheReadTokens;
+
+    /**
+     * The part of {@code inputTokens} written to the provider's prompt cache on this call (§4.3).
+     * Only providers that bill cache writes separately report it (Anthropic, at a premium); 0 otherwise.
+     */
+    int cacheWriteTokens;
 
     /**
      * Estimated cost in US cents (not dollars) — integral cents avoid floating-point drift.

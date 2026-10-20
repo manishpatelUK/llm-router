@@ -324,6 +324,23 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         return request.getMaxOutputTokens() == null ? modelMax : Math.min(modelMax, request.getMaxOutputTokens());
     }
 
+    /**
+     * An OpenAI-shaped {@code usage} object, with the optional {@code prompt_tokens_details}
+     * ({@code cached_tokens}, and OpenRouter's {@code cache_write_tokens}) and
+     * {@code completion_tokens_details.reasoning_tokens} read when the provider sends them.
+     */
+    static Usage parseUsage(JsonNode usage) {
+        JsonNode promptDetails = usage.path("prompt_tokens_details");
+        return Usage.builder()
+                .inputTokens(usage.path("prompt_tokens").asInt(0))
+                .outputTokens(usage.path("completion_tokens").asInt(0))
+                .reasoningTokens(usage.path("completion_tokens_details").path("reasoning_tokens").asInt(0))
+                .cacheReadTokens(promptDetails.path("cached_tokens").asInt(0))
+                .cacheWriteTokens(promptDetails.path("cache_write_tokens").asInt(0))
+                .estimatedCostUsdCents(0) // finalized by the router core against the capability table
+                .build();
+    }
+
     private Response parseResponse(HttpResponseRecord httpResponse) {
         if (httpResponse.statusCode() >= 300) {
             throw new ProviderHttpException(httpResponse.statusCode(), httpResponse.body(), httpResponse.retryAfter());
@@ -335,12 +352,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
         return Response.builder()
                 .content(message.path("content").asText(""))
                 .toolCalls(parseToolCalls(message.path("tool_calls")))
-                .usage(Usage.builder()
-                        .inputTokens(root.path("usage").path("prompt_tokens").asInt(0))
-                        .outputTokens(root.path("usage").path("completion_tokens").asInt(0))
-                        .reasoningTokens(0)
-                        .estimatedCostUsdCents(0) // finalized by the router core against the capability table
-                        .build())
+                .usage(parseUsage(root.path("usage")))
                 .original(root)
                 .build();
     }
@@ -395,12 +407,7 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
             return Response.builder()
                     .content(content.toString())
                     .toolCalls(toolCalls.values().stream().map(StreamedToolCall::toToolCall).toList())
-                    .usage(Usage.builder()
-                            .inputTokens(usage.path("prompt_tokens").asInt(0))
-                            .outputTokens(usage.path("completion_tokens").asInt(0))
-                            .reasoningTokens(0)
-                            .estimatedCostUsdCents(0) // finalized by the router core against the capability table
-                            .build())
+                    .usage(parseUsage(usage))
                     .original(chunks)
                     .build();
         }

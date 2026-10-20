@@ -42,6 +42,18 @@ public class ModelEntry {
     double inputCostPerMillionTokens;
     double outputCostPerMillionTokens;
 
+    /**
+     * Price of input tokens read from the prompt cache, or {@code null} for the provider's usual
+     * rate — see {@link #effectiveCacheReadCostPerMillionTokens()} and §7.1.
+     */
+    Double cacheReadCostPerMillionTokens;
+
+    /**
+     * Price of input tokens written to the prompt cache, or {@code null} for the provider's usual
+     * rate — see {@link #effectiveCacheWriteCostPerMillionTokens()} and §7.1.
+     */
+    Double cacheWriteCostPerMillionTokens;
+
     /** 0-10, relative reasoning/capability strength within this table. */
     double thinkingScore;
 
@@ -109,6 +121,29 @@ public class ModelEntry {
 
     /** UTC timestamp of when this specific row was last verified/updated. */
     Instant lastUpdated;
+
+    /**
+     * {@link #cacheReadCostPerMillionTokens} when set; otherwise a tenth of the input price for
+     * Anthropic (its published rate for every model) and the full input price for anyone else,
+     * since their cache discounts vary by model (§7.1).
+     */
+    public double effectiveCacheReadCostPerMillionTokens() {
+        if (cacheReadCostPerMillionTokens != null) {
+            return cacheReadCostPerMillionTokens;
+        }
+        return provider == Provider.ANTHROPIC ? inputCostPerMillionTokens * 0.1 : inputCostPerMillionTokens;
+    }
+
+    /**
+     * {@link #cacheWriteCostPerMillionTokens} when set; otherwise 1.25 times the input price for
+     * Anthropic (its rate for the default five-minute cache) and the full input price for anyone else (§7.1).
+     */
+    public double effectiveCacheWriteCostPerMillionTokens() {
+        if (cacheWriteCostPerMillionTokens != null) {
+            return cacheWriteCostPerMillionTokens;
+        }
+        return provider == Provider.ANTHROPIC ? inputCostPerMillionTokens * 1.25 : inputCostPerMillionTokens;
+    }
 
     /** {@link #reasoningControl}, with {@code null} read as {@link ReasoningControl#NONE}. */
     public ReasoningControl getReasoningControl() {

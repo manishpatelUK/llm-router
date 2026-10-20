@@ -14,21 +14,17 @@ far. Remove an item once it ships. Items within a section are roughly in priorit
 
 ## Cost and usage
 
-- **Prompt caching.** Only attachments get Anthropic `cache_control`. Long system prompts, tool
-  definitions and history, which agent loops resend every turn, aren't cached, so callers pay full
-  input price each time. Direction: cache the stable prefix (system, tools, earlier history) on
-  Anthropic automatically, with a config switch to turn it off. OpenAI and others cache
-  automatically. Report it either way (next item).
-- **Cached and reasoning tokens in `Usage`.** `Usage` has no cached-input count, and
-  `reasoningTokens` is always 0 except on Perplexity. So cost estimates overstate cached calls and
-  understate reasoning-heavy ones. Direction: add `cacheReadTokens` and `cacheWriteTokens`, fill
-  all three from each provider's usage block, and add cached-input prices to the capability table
-  (§7.1) so `estimatedCostUsd` uses them.
-- **Usage listener for metrics.** Tracking spend or latency means wrapping every call site.
-  Direction: an optional listener on `LlmRouter`, called once per attempt with provider, model,
-  outcome, latency, tokens and cost (and once per call with the total). Callers wire it to
-  Micrometer, OpenTelemetry or their own logs. A Micrometer/OpenTelemetry adapter can come later
-  as an optional module, so the core stays dependency-light.
+- **Cached-input prices in the seed table.** The table has the new `cacheReadCostPerMillionTokens`
+  field (§7.1) but no row sets it yet. Anthropic doesn't need it (its standard rates are applied
+  by default), but OpenAI and OpenRouter cached calls are priced at the full input rate until it's
+  filled. Direction: the next run of the update skill fills it from each provider's pricing page.
+- **Prompt caching through OpenRouter for Claude.** OpenRouter passes Anthropic `cache_control`
+  through for Claude models, but the OpenAI-compatible adapter sends none, so Claude reached
+  through OpenRouter isn't cached. Direction: the same two breakpoints as the Anthropic adapter
+  (§4.3), on OpenRouter requests to `anthropic/*` models.
+- **Micrometer and OpenTelemetry adapters for `UsageListener`.** Optional modules that turn the
+  listener's events (§5.6) into standard metrics and spans, so callers don't write the mapping.
+  Separate artifacts, so the core stays dependency-light.
 
 ## Request features
 
