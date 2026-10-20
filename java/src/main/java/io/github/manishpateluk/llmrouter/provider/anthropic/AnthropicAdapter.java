@@ -125,9 +125,25 @@ public final class AnthropicAdapter implements ProviderAdapter {
     private final Set<String> schemasTooLargeForGrammar = ConcurrentHashMap.newKeySet();
     private final Set<String> warnedSchemaHashes = ConcurrentHashMap.newKeySet();
 
-    /** Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's null/blank. */
+    /**
+     * Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's
+     * null/blank. The client makes no retries of its own: retrying is the router's job, under
+     * {@code RouterConfig.maxRetries} (§5.5).
+     */
     public AnthropicAdapter(String apiKey) {
-        this(apiKey == null || apiKey.isBlank() ? null : AnthropicOkHttpClient.builder().apiKey(apiKey).build());
+        this(newClient(apiKey, null));
+    }
+
+    /** The client {@link #AnthropicAdapter(String)} builds, or {@code null} without a key; {@code baseUrl} {@code null} for Anthropic's own. */
+    static AnthropicClient newClient(String apiKey, String baseUrl) {
+        if (apiKey == null || apiKey.isBlank()) {
+            return null;
+        }
+        AnthropicOkHttpClient.Builder builder = AnthropicOkHttpClient.builder().apiKey(apiKey).maxRetries(0);
+        if (baseUrl != null) {
+            builder.baseUrl(baseUrl);
+        }
+        return builder.build();
     }
 
     /** Accepts a pre-configured client directly — the seam tests mock. */

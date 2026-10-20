@@ -94,9 +94,25 @@ public final class OpenAiAdapter implements ProviderAdapter {
     private final OpenAIClient client;
     private final Map<String, String> uploadedFileIdsByContentHash = new ConcurrentHashMap<>();
 
-    /** Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's null/blank. */
+    /**
+     * Builds its own client from {@code apiKey}; {@link #isAvailable()} is {@code false} if it's
+     * null/blank. The client makes no retries of its own: retrying is the router's job, under
+     * {@code RouterConfig.maxRetries} (§5.5).
+     */
     public OpenAiAdapter(String apiKey) {
-        this(apiKey == null || apiKey.isBlank() ? null : OpenAIOkHttpClient.builder().apiKey(apiKey).build());
+        this(newClient(apiKey, null));
+    }
+
+    /** The client {@link #OpenAiAdapter(String)} builds, or {@code null} without a key; {@code baseUrl} {@code null} for OpenAI's own. */
+    static OpenAIClient newClient(String apiKey, String baseUrl) {
+        if (apiKey == null || apiKey.isBlank()) {
+            return null;
+        }
+        OpenAIOkHttpClient.Builder builder = OpenAIOkHttpClient.builder().apiKey(apiKey).maxRetries(0);
+        if (baseUrl != null) {
+            builder.baseUrl(baseUrl);
+        }
+        return builder.build();
     }
 
     /** Accepts a pre-configured client directly — the seam tests mock. */

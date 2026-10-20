@@ -19,6 +19,12 @@ code needs no change, and a config that sets none of them behaves exactly as bef
   `Retry-After` is honoured up to 30 seconds. `AttemptRecord.retries` counts the retries made.
 - **`cooldown`** (`CooldownPolicy.of(failures, duration)`): after that many failed attempts in a
   row, a model is skipped on later calls for `duration`, then its count resets.
+- **The SDKs no longer retry on their own.** The Anthropic and OpenAI clients the adapters build
+  used to retry a failed request twice (the SDKs' default) before the router saw it. They now make
+  one request, and retrying is left to `maxRetries`. With the default `maxRetries` of 0, a rate
+  limit or server error on those providers now falls back to the next candidate at once. To keep
+  retrying on the same model, set `maxRetries(2)`. A client you build yourself and pass to
+  `new AnthropicAdapter(client)` or `new OpenAiAdapter(client)` is unchanged.
 
 **Java additions:**
 
