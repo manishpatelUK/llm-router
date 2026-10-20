@@ -3,7 +3,7 @@
 Changes that affect callers of `llm-router`, newest first. Each entry says what changed and what, if
 anything, calling code needs to do. The full behavior is in [`LIBRARY_SPEC.md`](LIBRARY_SPEC.md).
 
-## Unreleased (after Java 1.0.11)
+## Java 1.0.12 (2026-10-20)
 
 ### Prompt caching, cached and reasoning tokens, usage listener
 
