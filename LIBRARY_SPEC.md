@@ -141,6 +141,7 @@ AttemptRecord {
   outcome: "success" | "failed" | "skipped"   // §12.6
   reason: string?                      // error message or skip reason (e.g. "no API key detected")
   thinkingLevel: string                // §12.3 — the level this candidate was resolved at (§5.1.2)
+  retries: int                         // retries made on this candidate before its outcome (§5.5); 0 when none
 }
 
 DroppedAttachment {
@@ -265,6 +266,16 @@ RouterConfig {
   requiredFeatures: string[]?       // features that must never be dropped — values per §12.9; default empty. See §5.4.
   fallback: FallbackPolicy?         // "sameDepth" | "finish"; default "sameDepth". See §5.1.2.
   sendThinkingLevel: boolean?       // default false — send the thinking level to the model's own reasoning control (§7.4)
+  attemptTimeout: duration?         // no default (no limit) — the longest one attempt may take (§5.5)
+  callTimeout: duration?            // no default (no limit) — the longest the whole call may take, across attempts, retries and fallback (§5.5)
+  maxRetries: int?                  // default 0 — retries of a transient failure on the same model before falling back (§5.5)
+  retryDelay: duration?             // default 1s — the wait before the first retry, doubled for each one after (§5.5)
+  cooldown: CooldownPolicy?         // no default (off) — skip a model on later calls after repeated failures (§5.5)
+}
+
+CooldownPolicy {
+  failures: int                     // failed attempts in a row that start a cooldown; at least 1
+  duration: duration                // how long the model is then skipped; positive
 }
 
 RouteEntry =
@@ -272,7 +283,7 @@ RouteEntry =
   | { provider: string }                  // provider only — resolved to a model at call time via thinkingLevel (§7.2)
 ```
 
-`provider` above must be one of the canonical provider IDs (§12.1). `thinkingLevel`, `structuredOutputStrategy` and `fallback` must be one of the exact literal values given here — see §12.3, §12.4 and §12.10 for the consolidated, cross-language reference. Every field except `route` carries its default when unset; an implementation that lets a caller explicitly null one out (e.g. `thinkingLevel`, `fallback`) raises `INVALID_CONFIG` at call time (§10).
+`provider` above must be one of the canonical provider IDs (§12.1). `thinkingLevel`, `structuredOutputStrategy` and `fallback` must be one of the exact literal values given here — see §12.3, §12.4 and §12.10 for the consolidated, cross-language reference. Every field except `route`, `temperature`, `topP`, `attemptTimeout`, `callTimeout` and `cooldown` (which mean "none" when unset) carries its default when unset; an implementation that lets a caller explicitly null one out (e.g. `thinkingLevel`, `fallback`) raises `INVALID_CONFIG` at call time (§10).
 
 Implementations should let callers derive a variant of a config that changes one field and keeps every other (a `toBuilder()`/copy-with idiom), so a wrapper that adjusts one preference never has to copy fields by hand and silently lose ones added later.
 
@@ -339,6 +350,24 @@ By default, a feature a candidate can't support is dropped and the attempt goes 
 - **Default.** An empty `requiredFeatures` (the default) leaves routing and negotiation exactly as described in §4–§5.3.
 
 Credential checks still come first: a candidate with no credentials is skipped with the usual `no API key detected` reason, whatever its capabilities.
+
+### 5.5 Timeouts, retries and cooldown
+
+All five settings are off by default. With none of them set, a call behaves exactly as described in §5.1–§5.4: every attempt runs as long as the provider client lets it, a failure moves straight to the next candidate, and every call tries every candidate.
+
+**Timeouts.** `attemptTimeout` bounds each attempt. An attempt that outlasts it is abandoned and recorded as `"failed"` with the reason `attempt timed out after <duration>`, and the router falls back as for any other failure. Implementations cancel the underlying request where their HTTP client allows it. Whether or not it can be cancelled, nothing from an abandoned attempt reaches the caller: in a streamed call (§4.2) the listener is reset and gets no further text from that attempt. `callTimeout` bounds the whole call: each attempt is limited to the time left on it (or `attemptTimeout`, if shorter), and once it runs out the router stops and raises `ROUTER_EXHAUSTED` with the attempts made so far. Candidates not yet reached aren't listed. An attempt cut short by the call's limit has the reason `call timed out: callTimeout of <duration> reached`. Both must be positive when set. With neither set, sync calls run on the caller's thread as before.
+
+**Retries.** With `maxRetries` above 0, an attempt whose failure is **transient** is retried on the same model, up to `maxRetries` times, before the router falls back. The adapter decides what counts as transient (§8.1). The built-in adapters count HTTP 408, 429, 500, 502, 503, 504 and 529, and I/O errors such as a dropped connection. Bad requests, bad credentials and unknown models aren't retried, and neither are timeouts (retrying would wait as long again). The wait before retry *n* (from 1) is `retryDelay × 2^(n−1)`, unless the provider's response says how long to wait (`Retry-After` in seconds or as an HTTP date, or `retry-after-ms`), in which case that's used instead. If the provider asks for more than 30 seconds, or the wait would reach `callTimeout`, the router doesn't retry and falls back at once: another candidate is likely faster. A retried attempt that finally fails is recorded once in `attempts`, with `retries` set to the number of retries made. One that finally succeeds adds nothing to `attempts`. In a streamed call, the listener is reset before each retry, as before a fallback. An exception from the caller's own stream listener (§4.2) is never retried.
+
+Some provider SDKs retry on their own before the adapter sees a failure (the official Anthropic and OpenAI SDKs retry twice by default). `maxRetries` comes on top of that.
+
+**Cooldown.** With `cooldown` set, the router counts each (provider, model)'s failed attempts in a row. A failed attempt counts once however many retries it made; an attempt cut off by a timeout counts; a request interceptor (§4.1) that throws doesn't, since that's not the provider's fault. Once a model reaches `cooldown.failures`, it is skipped on later calls for `cooldown.duration`, recorded as `"skipped"` with a reason such as `cooling down for another 42s after 3 failed attempt(s) in a row`. Provider-only entries and the default route pick among the provider's other models in the meantime. When the duration is up, the model's count goes back to zero and it is tried as normal. A success also resets the count. If every candidate is cooling down or fails, the call raises `ROUTER_EXHAUSTED`, as with any other exhaustion.
+
+- The counts belong to the router instance and last as long as it does, so a model failing for one call is skipped by the next, on any thread. They aren't shared between router instances or processes.
+- `cooldown` is read per call, from that call's config. A call without it neither checks nor updates the counts, so a model cooling down for calls that use cooldown is still tried by calls that don't.
+- `cooldown.failures` must be at least 1 and `cooldown.duration` positive; `maxRetries` and `retryDelay` must not be negative. Otherwise `INVALID_CONFIG` (§10).
+
+Embedding calls (§3.2) take no `RouterConfig`, so none of this applies to them.
 
 ---
 
@@ -495,6 +524,9 @@ ProviderAdapter {
   embed(model, texts, dimensions): EmbeddingResponse fragment   // optional, §3.2
   sendStreamingAsync(model, adaptedRequest, onText): future<RawResponse>   // optional, §4.2; default: sendStreaming off the caller's thread
   responseSchemaProblem(model, responseSchema): string | null   // optional, §4; why this schema can't be enforced natively, null = it can (default)
+  isTransient(failure): boolean                // optional, §5.5; whether a failure is worth retrying on the same model
+                                               // default: transient HTTP statuses and I/O errors
+  retryAfter(failure): duration | null         // optional, §5.5; the wait the provider asked for (Retry-After), null = none
   normalize(rawResponse): Response fragments   // maps provider response → unified Response shape
 }
 ```
@@ -556,7 +588,10 @@ No logging is mandatory-on by default beyond what the host application's logging
 | A requested feature (schema/tools) isn't supported by the current candidate model | Not an error — adapt/drop per §4, continue the attempt, record in `droppedFeatures`. |
 | …and that feature is in `RouterConfig.requiredFeatures` | Not an error by itself — the candidate is skipped and recorded in `attempts` (§5.4); if no candidate qualifies, exhaustion (§5.1.1). |
 | A `ToolDefinition` breaks the §3.1 rules (bad name, duplicate name, non-object `parameters`) | Raise an `INVALID_REQUEST` error immediately at call time, before any provider is contacted, listing every violation. |
-| A provider call fails (network, rate limit, 4xx/5xx, timeout) | Not fatal — recorded as a failed attempt, router advances to next candidate. |
+| A provider call fails (network, rate limit, 4xx/5xx, timeout) | Not fatal — recorded as a failed attempt, router advances to next candidate. With `maxRetries`, a transient failure is first retried on the same model (§5.5). |
+| An attempt outlasts `attemptTimeout` | Not fatal — recorded as a failed attempt, router advances to next candidate (§5.5). |
+| The call outlasts `callTimeout` | Raise `RouterExhaustedError` with the attempts made so far (§5.5). |
+| A candidate is cooling down after repeated failures | Not an error — the candidate is skipped and recorded in `attempts` (§5.5). |
 | Every candidate fails or is skipped | Raise `RouterExhaustedError` (or language equivalent) containing the full `attempts` list. |
 | A candidate's context window can't hold the estimated request (§5.3) | Not an error — the candidate is skipped and recorded in `attempts`. |
 | Malformed `RouterConfig` (e.g. invalid `thinkingLevel` value, or `fallback` explicitly nulled) | Raise a configuration error immediately at call time, not buried inside routing logic. |
@@ -570,7 +605,7 @@ No logging is mandatory-on by default beyond what the host application's logging
 - Dependency injection / framework integration patterns.
 - Packaging/distribution mechanics (Maven Central, npm, PyPI, NuGet, crates.io, etc.).
 - Tool-call *execution* — the library only surfaces requested tool calls; invoking them is the host application's responsibility.
-- Retry/backoff timing policy for transient provider errors within a single attempt — implementations may add a small, sensible retry (e.g. one retry on 429/5xx) before treating a candidate as failed, but this is an implementation detail, not a contract.
+- How each language waits and cancels for §5.5's timeouts and retry delays (threads, timers, cancellation tokens), as long as the observable behaviour matches §5.5.
 
 ---
 

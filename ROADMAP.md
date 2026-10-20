@@ -5,21 +5,12 @@ far. Remove an item once it ships. Items within a section are roughly in priorit
 
 ## Resilience
 
-- **Timeouts and transient retries.** There's no way to bound how long an attempt (or a whole call)
-  takes, and no retry on a 429/5xx before moving to the next candidate. A hung provider holds the
-  caller until the HTTP client gives up. Direction: `RouterConfig.attemptTimeout` and `callTimeout`
-  (a deadline across all attempts, so fallback can't run unbounded), plus one retry on 429/503 that
-  honours `Retry-After` when it's short. §11 already allows the retry. A timeout becomes a `FAILED`
-  attempt with a reason, so fallback works as for any other failure.
-- **Provider cooldown (circuit breaker).** Every call re-tries a provider that has just failed for
-  every caller, adding its timeout to each request during an outage. Direction: the router remembers
-  repeated failures (auth errors, 5xx, timeouts) per provider and model for the life of the
-  `LlmRouter`. It skips that candidate for a short, growing cooldown and records it as `SKIPPED`
-  with a reason such as `cooling down after 3 failures`. Opt-out via config. Never skip the last
-  remaining candidate.
 - **Spend cap per call.** `costOptimized` orders by price but nothing stops an expensive call.
   Direction: `RouterConfig.maxCostUsd`: skip any candidate whose pre-call estimate (§5.3) exceeds
-  it, with a reason in `attempts`. It caps the estimate, not the actual bill.
+  it, with a reason in `attempts`. It caps the estimate, not the actual bill. The input side of the
+  estimate is already computed for every candidate. The weak part is output, which is
+  `maxOutputTokens` or a flat 1,000 tokens, so a cap is only tight when callers set
+  `maxOutputTokens`. Reasoning tokens and Perplexity's per-search fees aren't in the estimate at all.
 
 ## Cost and usage
 

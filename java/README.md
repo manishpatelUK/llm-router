@@ -100,6 +100,27 @@ ReasoningSettings sent = router.complete("Find the flaw in this proof.", deep).g
 
 See §5.1.2 and §7.4 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
+**Timeouts, retries and cooldown.** All off by default. A config that sets none of them behaves exactly as before:
+
+```java
+import io.github.manishpateluk.llmrouter.config.CooldownPolicy;
+import java.time.Duration;
+
+RouterConfig resilient = config.toBuilder()
+    .attemptTimeout(Duration.ofSeconds(30))  // give up on one attempt after 30s and fall back
+    .callTimeout(Duration.ofSeconds(90))     // and on the whole call after 90s
+    .maxRetries(2)                           // retry a 429/5xx/dropped connection on the same model twice first
+    .retryDelay(Duration.ofSeconds(1))       // 1s, then 2s (a provider's Retry-After replaces it)
+    .cooldown(CooldownPolicy.of(3, Duration.ofMinutes(2))) // after 3 failed attempts in a row, skip that model for 2 minutes
+    .build();
+```
+
+- **Timeouts.** A timed-out attempt is `FAILED` in `getAttempts()`, with a reason like `attempt timed out after 30s`, and the router moves to the next candidate. When `callTimeout` runs out, you get a `RouterExhaustedException` with the attempts made so far. A streamed attempt that times out is reset (`onReset()`), and none of its later text reaches your listener. With a timeout set, the sync call runs each attempt on a virtual thread, interrupted on timeout. Without one, it runs on your thread as before.
+- **Retries.** Only transient failures are retried: HTTP 408, 429, 500, 502, 503, 504 and 529, and I/O errors. Bad requests, bad credentials and timeouts aren't. A provider's `Retry-After` replaces `retryDelay`. If it asks for more than 30 seconds, or the wait would pass `callTimeout`, the router falls back instead. `AttemptRecord.getRetries()` says how many retries a failed candidate got. The Anthropic and OpenAI SDKs already retry twice by default, and `maxRetries` comes on top. A custom adapter decides what's transient by overriding `isTransient(...)` and `retryAfter(...)`.
+- **Cooldown.** A model that's cooling down is `SKIPPED` with a reason like `cooling down for another 42s after 3 failed attempt(s) in a row`. A provider-only entry picks another of that provider's models in the meantime. When the time is up, the count resets and the model is tried as normal. A success also resets it. If every candidate is cooling down, you get the usual `RouterExhaustedException`. The counts live in the `LlmRouter` instance, so reuse one router across calls. Calls whose config has no `cooldown` ignore them.
+
+See §5.5 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+
 **Async:**
 
 ```java

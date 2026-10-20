@@ -5,6 +5,29 @@ anything, calling code needs to do. The full behavior is in [`LIBRARY_SPEC.md`](
 
 ## Unreleased (after Java 1.0.11)
 
+### Timeouts, retries and cooldown
+
+New, optional `RouterConfig` settings (`LIBRARY_SPEC.md` §5.5). All are off by default, so calling
+code needs no change, and a config that sets none of them behaves exactly as before.
+
+- **`attemptTimeout`** gives up on an attempt that takes too long and falls back to the next
+  candidate. The attempt is recorded as failed, with the reason `attempt timed out after <duration>`.
+- **`callTimeout`** bounds the whole call, across attempts, retries and fallback. When it runs out,
+  the router throws `RouterExhaustedException` with the attempts made so far.
+- **`maxRetries`** (default 0) and **`retryDelay`** (default 1s, doubling) retry a transient failure
+  (HTTP 408/429/5xx/529 or an I/O error) on the same model before falling back. A provider's
+  `Retry-After` is honoured up to 30 seconds. `AttemptRecord.retries` counts the retries made.
+- **`cooldown`** (`CooldownPolicy.of(failures, duration)`): after that many failed attempts in a
+  row, a model is skipped on later calls for `duration`, then its count resets.
+
+**Java additions:**
+
+- `ProviderAdapter.isTransient(Throwable)` and `retryAfter(Throwable)` are default methods, so
+  existing custom adapters keep compiling.
+- `ProviderHttpException.retryAfter()`.
+- `HttpTransport.HttpResponseRecord` gains a `headers` component. Its two-argument constructor
+  still works.
+
 ### Capability table refresh (2026-10-16)
 
 - **Replaced:** `anthropic/claude-haiku-4-5-20251001` with `claude-haiku-5-5` ($0.10 / $0.50, 1M context,

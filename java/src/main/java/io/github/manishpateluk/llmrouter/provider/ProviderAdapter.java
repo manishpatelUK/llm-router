@@ -1,5 +1,6 @@
 package io.github.manishpateluk.llmrouter.provider;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -10,6 +11,7 @@ import java.util.function.Consumer;
 import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
+import io.github.manishpateluk.llmrouter.provider.compatible.ProviderHttpException;
 
 /**
  * Translates the unified {@link Request}/{@link Response} shapes to/from one provider's wire
@@ -78,6 +80,30 @@ public interface ProviderAdapter {
      */
     default String responseSchemaProblem(String model, Map<String, Object> responseSchema) {
         return null;
+    }
+
+    /**
+     * Whether {@code failure}, thrown by one of this adapter's sends, is worth retrying on the same
+     * model when {@code RouterConfig.maxRetries} allows (§5.5): a rate limit, a server error, or a
+     * dropped connection, rather than a bad request or bad credentials. The default recognises
+     * {@link ProviderHttpException} with a status from {@link TransientFailures#isTransientStatus}
+     * and I/O errors; SDK-backed adapters override it for their SDK's exceptions.
+     */
+    default boolean isTransient(Throwable failure) {
+        ProviderHttpException http = TransientFailures.find(failure, ProviderHttpException.class);
+        if (http != null) {
+            return TransientFailures.isTransientStatus(http.statusCode());
+        }
+        return TransientFailures.isIoFailure(failure);
+    }
+
+    /**
+     * The wait the provider asked for before a retry of {@code failure} (its {@code Retry-After}),
+     * or {@code null} if it gave none, in which case the router uses {@code RouterConfig.retryDelay}.
+     */
+    default Duration retryAfter(Throwable failure) {
+        ProviderHttpException http = TransientFailures.find(failure, ProviderHttpException.class);
+        return http == null ? null : http.retryAfter();
     }
 
     /**

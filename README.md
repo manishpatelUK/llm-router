@@ -63,6 +63,8 @@ Two more `RouterConfig` settings shape how hard and how far the router tries:
 - `fallback: finish` lets a run step down one thinking level at a time, down to `low`, instead of failing once every model at the requested level has failed. The response says which level actually answered.
 - `sendThinkingLevel: true` sends the thinking level to the chosen model's own reasoning control (an effort level, or a thinking budget), not only uses it to pick the model.
 
+For resilience, `attemptTimeout` and `callTimeout` bound how long an attempt or a whole call may take, `maxRetries` retries rate limits and server errors on the same model before falling back, and `cooldown` skips a model on later calls for a while after it keeps failing. All are off by default.
+
 Attachments are matched one by one against each model's accepted media types (images, PDFs and other documents are listed separately in the capability table), so a model that can't read one attachment still gets the rest.
 
 This is a deliberately short summary — see [`LIBRARY_SPEC.md`](LIBRARY_SPEC.md) for the full, authoritative behavior spec (capability negotiation, the model-selection heuristic, cost-optimized ordering, credential detection, error codes, and the canonical enum values every language implementation must share).

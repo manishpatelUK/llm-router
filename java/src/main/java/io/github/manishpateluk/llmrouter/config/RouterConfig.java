@@ -1,5 +1,6 @@
 package io.github.manishpateluk.llmrouter.config;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
@@ -13,7 +14,7 @@ import lombok.extern.jackson.Jacksonized;
  * deliberately not rebuilt per request.
  *
  * <p>{@code thinkingLevel}, {@code costOptimized}, {@code structuredOutputStrategy},
- * {@code requiredFeatures}, {@code fallback}, and {@code sendThinkingLevel} always carry their spec-defined default when not explicitly set, so
+ * {@code requiredFeatures}, {@code fallback}, {@code sendThinkingLevel}, {@code maxRetries} and {@code retryDelay} always carry their spec-defined default when not explicitly set, so
  * downstream routing code never needs to null-check them. {@code route} is the one field that stays {@code null} by default —
  * unlike the others, "no route given" resolves dynamically from available providers (§5.2)
  * rather than to a fixed value, so a {@code RouterConfig.builder().build()} with no other
@@ -79,4 +80,39 @@ public class RouterConfig {
      */
     @Builder.Default
     boolean sendThinkingLevel = false;
+
+    /**
+     * The longest one attempt may take before the router gives up on it and falls back to the
+     * next candidate (§5.5). {@code null} (the default) sets no limit beyond the provider
+     * client's own, as before this field existed.
+     */
+    Duration attemptTimeout;
+
+    /**
+     * The longest a whole call may take, across every attempt, retry and fallback (§5.5). Once
+     * it's reached the router stops and throws {@code RouterExhaustedException}. {@code null}
+     * (the default) sets no limit.
+     */
+    Duration callTimeout;
+
+    /**
+     * How many times to retry a candidate on the same model after a transient failure (a rate
+     * limit, a 5xx, a dropped connection), before falling back (§5.5). 0 (the default) never
+     * retries, as before this field existed.
+     */
+    @Builder.Default
+    int maxRetries = 0;
+
+    /**
+     * The wait before the first retry, doubled for each one after it. A provider's
+     * {@code Retry-After} replaces it when present (§5.5). Only used when {@code maxRetries > 0}.
+     */
+    @Builder.Default
+    Duration retryDelay = Duration.ofSeconds(1);
+
+    /**
+     * Skips a model on later calls for a while after it fails repeatedly (§5.5). {@code null}
+     * (the default) switches cooldown off.
+     */
+    CooldownPolicy cooldown;
 }

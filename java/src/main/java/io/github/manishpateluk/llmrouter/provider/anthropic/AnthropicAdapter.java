@@ -3,6 +3,7 @@ package io.github.manishpateluk.llmrouter.provider.anthropic;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -26,6 +27,7 @@ import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.JsonValue;
 import com.anthropic.core.http.StreamResponse;
+import com.anthropic.errors.AnthropicIoException;
 import com.anthropic.errors.AnthropicServiceException;
 import com.anthropic.helpers.MessageAccumulator;
 import com.anthropic.models.ErrorType;
@@ -59,6 +61,7 @@ import io.github.manishpateluk.llmrouter.model.ToolDefinition;
 import io.github.manishpateluk.llmrouter.negotiation.CapabilityNegotiator;
 import io.github.manishpateluk.llmrouter.provider.Provider;
 import io.github.manishpateluk.llmrouter.provider.ProviderAdapter;
+import io.github.manishpateluk.llmrouter.provider.TransientFailures;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -140,6 +143,22 @@ public final class AnthropicAdapter implements ProviderAdapter {
     @Override
     public boolean isAvailable() {
         return client != null;
+    }
+
+    /** Also recognises the SDK's own HTTP and I/O exceptions; see {@link ProviderAdapter#isTransient}. */
+    @Override
+    public boolean isTransient(Throwable failure) {
+        AnthropicServiceException service = TransientFailures.find(failure, AnthropicServiceException.class);
+        if (service != null) {
+            return TransientFailures.isTransientStatus(service.statusCode());
+        }
+        return TransientFailures.find(failure, AnthropicIoException.class) != null || ProviderAdapter.super.isTransient(failure);
+    }
+
+    @Override
+    public Duration retryAfter(Throwable failure) {
+        AnthropicServiceException service = TransientFailures.find(failure, AnthropicServiceException.class);
+        return service == null ? null : TransientFailures.retryAfter(name -> service.headers().values(name));
     }
 
     /** What {@link AnthropicSchemas} can't turn into a schema Anthropic's structured outputs accept, if anything. */

@@ -1,10 +1,13 @@
 package io.github.manishpateluk.llmrouter.provider.compatible;
 
+import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 import io.github.manishpateluk.llmrouter.provider.ProviderAdapter;
+import io.github.manishpateluk.llmrouter.provider.TransientFailures;
 
 /**
  * A minimal HTTP transport seam — lets {@link OpenAiCompatibleHttpAdapter} and the Perplexity
@@ -42,6 +45,33 @@ public interface HttpTransport {
     record HttpRequestRecord(String url, Map<String, String> headers, String jsonBody) {
     }
 
-    record HttpResponseRecord(int statusCode, String body) {
+    /**
+     * @param headers response headers by name; only read for an error status (e.g.
+     *        {@code Retry-After}), so a transport may leave it empty
+     */
+    record HttpResponseRecord(int statusCode, String body, Map<String, List<String>> headers) {
+
+        public HttpResponseRecord {
+            headers = headers == null ? Map.of() : headers;
+        }
+
+        public HttpResponseRecord(int statusCode, String body) {
+            this(statusCode, body, Map.of());
+        }
+
+        /** A header's values, matching its name case-insensitively; empty if absent. */
+        public List<String> header(String name) {
+            for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+                if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(name)) {
+                    return entry.getValue();
+                }
+            }
+            return List.of();
+        }
+
+        /** The wait the provider asked for in {@code Retry-After} (or {@code retry-after-ms}), or {@code null}. */
+        public Duration retryAfter() {
+            return TransientFailures.retryAfter(this::header);
+        }
     }
 }

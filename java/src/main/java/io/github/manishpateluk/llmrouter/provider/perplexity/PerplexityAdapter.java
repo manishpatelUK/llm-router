@@ -120,7 +120,7 @@ public final class PerplexityAdapter implements ProviderAdapter {
         StreamAccumulator accumulator = new StreamAccumulator(onText);
         HttpResponseRecord status = transport.sendStreaming(toHttpRequest(body), accumulator::acceptLine);
         if (status.statusCode() >= 300) {
-            throw new ProviderHttpException(status.statusCode(), status.body());
+            throw new ProviderHttpException(status.statusCode(), status.body(), status.retryAfter());
         }
         return accumulator.toResponse();
     }
@@ -305,7 +305,7 @@ public final class PerplexityAdapter implements ProviderAdapter {
 
     private Response parseResponse(HttpResponseRecord httpResponse) {
         if (httpResponse.statusCode() >= 300) {
-            throw new ProviderHttpException(httpResponse.statusCode(), httpResponse.body());
+            throw new ProviderHttpException(httpResponse.statusCode(), httpResponse.body(), httpResponse.retryAfter());
         }
         JsonNode root = readTree(httpResponse.body());
         requireNotFailed(root);

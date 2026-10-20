@@ -34,7 +34,7 @@ public final class JdkHttpTransport implements HttpTransport {
     public HttpResponseRecord send(HttpRequestRecord request) {
         try {
             HttpResponse<String> response = client.send(toJdkRequest(request), HttpResponse.BodyHandlers.ofString());
-            return new HttpResponseRecord(response.statusCode(), response.body());
+            return new HttpResponseRecord(response.statusCode(), response.body(), response.headers().map());
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         } catch (InterruptedException e) {
@@ -46,7 +46,7 @@ public final class JdkHttpTransport implements HttpTransport {
     @Override
     public CompletableFuture<HttpResponseRecord> sendAsync(HttpRequestRecord request) {
         return client.sendAsync(toJdkRequest(request), HttpResponse.BodyHandlers.ofString())
-                .thenApply(response -> new HttpResponseRecord(response.statusCode(), response.body()));
+                .thenApply(response -> new HttpResponseRecord(response.statusCode(), response.body(), response.headers().map()));
     }
 
     /** Streams the body with {@link HttpResponse.BodyHandlers#ofLines()}, delivering each line as it arrives. */
@@ -56,7 +56,7 @@ public final class JdkHttpTransport implements HttpTransport {
             HttpResponse<Stream<String>> response = client.send(toJdkRequest(request), HttpResponse.BodyHandlers.ofLines());
             try (Stream<String> lines = response.body()) {
                 if (response.statusCode() >= 300) {
-                    return new HttpResponseRecord(response.statusCode(), lines.collect(Collectors.joining("\n")));
+                    return new HttpResponseRecord(response.statusCode(), lines.collect(Collectors.joining("\n")), response.headers().map());
                 }
                 lines.forEach(onLine);
             }

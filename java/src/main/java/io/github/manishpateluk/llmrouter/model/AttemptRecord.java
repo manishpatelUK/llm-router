@@ -25,4 +25,7 @@ public class AttemptRecord {
      * when {@code FallbackPolicy.FINISH} stepped down (§5.1.2).
      */
     ThinkingLevel thinkingLevel;
+
+    /** Retries made on this candidate before its outcome, under {@code RouterConfig.maxRetries} (§5.5); 0 when none. */
+    int retries;
 }

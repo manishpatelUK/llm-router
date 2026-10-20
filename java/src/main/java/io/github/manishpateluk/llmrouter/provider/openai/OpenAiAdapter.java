@@ -3,6 +3,7 @@ package io.github.manishpateluk.llmrouter.provider.openai;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -24,10 +25,13 @@ import io.github.manishpateluk.llmrouter.model.ToolCall;
 import io.github.manishpateluk.llmrouter.model.ToolDefinition;
 import io.github.manishpateluk.llmrouter.provider.Provider;
 import io.github.manishpateluk.llmrouter.provider.ProviderAdapter;
+import io.github.manishpateluk.llmrouter.provider.TransientFailures;
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.core.JsonValue;
 import com.openai.core.http.StreamResponse;
+import com.openai.errors.OpenAIServiceException;
+import com.openai.errors.OpenAIIoException;
 import com.openai.helpers.ChatCompletionAccumulator;
 import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
@@ -108,6 +112,22 @@ public final class OpenAiAdapter implements ProviderAdapter {
     @Override
     public boolean isAvailable() {
         return client != null;
+    }
+
+    /** Also recognises the SDK's own HTTP and I/O exceptions; see {@link ProviderAdapter#isTransient}. */
+    @Override
+    public boolean isTransient(Throwable failure) {
+        OpenAIServiceException service = TransientFailures.find(failure, OpenAIServiceException.class);
+        if (service != null) {
+            return TransientFailures.isTransientStatus(service.statusCode());
+        }
+        return TransientFailures.find(failure, OpenAIIoException.class) != null || ProviderAdapter.super.isTransient(failure);
+    }
+
+    @Override
+    public Duration retryAfter(Throwable failure) {
+        OpenAIServiceException service = TransientFailures.find(failure, OpenAIServiceException.class);
+        return service == null ? null : TransientFailures.retryAfter(name -> service.headers().values(name));
     }
 
     @Override
