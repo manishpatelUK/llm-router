@@ -14,13 +14,19 @@ far. Remove an item once it ships. Items within a section are roughly in priorit
 
 ## Cost and usage
 
-- **Cached-input prices in the seed table.** The table has the new `cacheReadCostPerMillionTokens`
-  field (§7.1) but no row sets it yet. Anthropic doesn't need it (its standard rates are applied
-  by default), but OpenAI and OpenRouter cached calls are priced at the full input rate until it's
-  filled. Direction: the next run of the update skill fills it from each provider's pricing page.
+- **OpenAI 12-hour cache retention.** The adapter marks the end of the conversation with an
+  explicit breakpoint (§4.3), at OpenAI's default `30m` lifetime; the table already carries the
+  12-hour write price. Direction: map `PromptCacheTtl.LONG` to the longer lifetime once
+  `prompt_cache_options.ttl` accepts it (the SDK documents `30m` as the only value today).
+- **OpenAI reasoning items between steps.** The OpenAI adapter is stateless (`store: false`) and
+  doesn't send the model's reasoning items back with its function calls, since `Message` has
+  nowhere to keep them, so a GPT-6 model reasons afresh on each tool step. OpenAI says passing them
+  back (`include: ["reasoning.encrypted_content"]`) improves tool-using runs and reuses cached
+  reasoning. Direction: an opaque, provider-specific field on assistant `Message`s that the adapter
+  fills and replays, and that llm-agent-loop stores with the conversation.
 - **Prompt caching through OpenRouter for Claude.** OpenRouter passes Anthropic `cache_control`
   through for Claude models, but the OpenAI-compatible adapter sends none, so Claude reached
-  through OpenRouter isn't cached. Direction: the same two breakpoints as the Anthropic adapter
+  through OpenRouter isn't cached. Direction: the same breakpoints as the Anthropic adapter
   (§4.3), on OpenRouter requests to `anthropic/*` models.
 - **Micrometer and OpenTelemetry adapters for `UsageListener`.** Optional modules that turn the
   listener's events (§5.6) into standard metrics and spans, so callers don't write the mapping.

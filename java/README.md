@@ -10,7 +10,7 @@ Include this in your `pom.xml`:
 <dependency>
   <groupId>io.github.manishpateluk</groupId>
   <artifactId>llm-router</artifactId>
-  <version>1.0.12</version>
+  <version>1.0.14</version>
 </dependency>
 ```
 
@@ -91,7 +91,7 @@ response.getThinkingLevel();                 // the level that answered, e.g. ME
 response.getAttempts().get(0).getThinkingLevel(); // the level each earlier attempt was made at
 ```
 
-**Sending the thinking level to the provider.** `thinkingLevel` always chooses the model. Set `sendThinkingLevel(true)` and it also goes to the chosen model's own reasoning control: Anthropic's `effort` (or a thinking budget on Claude Haiku 4.5), OpenAI's `reasoning_effort`, or OpenRouter's `reasoning.effort`. `MAX` maps to the model's highest level, such as `xhigh` or `max`. It's off by default, so models keep their provider's default reasoning. A thinking budget can't be combined with `temperature`/`topP`, so those are dropped and reported in `getDroppedFeatures()` for that attempt. `getReasoning()` on the response says what was sent:
+**Sending the thinking level to the provider.** `thinkingLevel` always chooses the model. Set `sendThinkingLevel(true)` and it also goes to the chosen model's own reasoning control: Anthropic's `effort` (or a thinking budget on Claude Haiku 4.5), OpenAI's `reasoning.effort`, or OpenRouter's `reasoning.effort`. `MAX` maps to the model's highest level, such as `xhigh` or `max`. It's off by default, so models keep their provider's default reasoning. A thinking budget can't be combined with `temperature`/`topP`, so those are dropped and reported in `getDroppedFeatures()` for that attempt. `getReasoning()` on the response says what was sent:
 
 ```java
 RouterConfig deep = config.toBuilder().thinkingLevel(ThinkingLevel.MAX).sendThinkingLevel(true).build();
@@ -121,17 +121,18 @@ RouterConfig resilient = config.toBuilder()
 
 See §5.5 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
-**Prompt caching.** On by default. On Anthropic, the router marks the parts of a request that repeat across calls (system instructions or tools, and the conversation so far) so later calls read them from Anthropic's cache at a tenth of the input price. OpenAI and the other providers cache on their own. `Usage` says what was cached:
+**Prompt caching.** On by default. Providers only read back a prefix a later call repeats exactly, so to benefit, keep each call's system instructions, tools and history the same as the previous call's, add new turns at the end, and put whatever changes per call in the prompt. Files you keep in a conversation go on the history message that showed them, `Message.user(text, attachments)`, not on every prompt. On Anthropic the router then marks the tools, the system instructions, any `SYSTEM` turns and the end of the conversation, so each call reads everything before its new turns from the cache, at 0.025–0.1× the input price depending on the model; the prompt itself is never marked. On OpenAI the router marks the end of the conversation the same way. Perplexity and the OpenAI-compatible providers cache on their own. `RouterConfig.promptCacheTtl(PromptCacheTtl.LONG)` asks Anthropic for its one-hour cache (writes 2× instead of 1.25×) when calls sharing a prefix are more than five minutes apart. `Usage` says what was cached:
 
 ```java
 Usage usage = response.getUsage();
 usage.getInputTokens();      // every input token, cached or not
 usage.getCacheReadTokens();  // of which read from the cache
-usage.getCacheWriteTokens(); // of which written to it (Anthropic bills writes at 1.25x the input price)
+usage.getCacheWriteTokens(); // of which written to it (Anthropic and OpenAI bill writes at a premium)
+usage.getCacheWriteLongTtlTokens(); // of those writes, the ones with the long lifetime
 usage.getReasoningTokens();  // the part of getOutputTokens() spent reasoning, where the provider says
 ```
 
-The cost estimate prices cached tokens at the cache rates. To send no cache markers, set `.promptCaching(false)` on the config. See §4.3 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
+The cost estimate prices cached tokens at the capability table's cache rates, and long prompts at a model's long-context rates. To send no cache markers, set `.promptCaching(false)` on the config. See §4.3 of [`LIBRARY_SPEC.md`](../LIBRARY_SPEC.md).
 
 **Usage listener.** To track spend, tokens or latency without wrapping every call, give the router a `UsageListener`. It hears every attempt (succeeded, failed or skipped) and every call, including async, streaming and embedding calls:
 
@@ -238,8 +239,8 @@ Response response = router.complete(Request.builder()
 
 **Repeated attachments in a multi-turn conversation are deduplicated automatically.** If you pass the same attachment (byte-identical content) on `Request.attachments` across several calls — the common case for a tool-calling loop that keeps a file in context turn after turn — the Anthropic and OpenAI adapters upload it once via that provider's Files API and reference it by file id on every later call instead of re-encoding and re-sending the bytes. There's nothing to opt into: just keep passing the attachment as you already do, and reuse the same `LlmRouter` instance across the conversation (which you should be doing anyway). A few things worth knowing:
 
-- Anthropic dedupes both images and documents this way, and also tags every attachment content block with an ephemeral `cache_control` hint so Anthropic can reuse the surrounding prompt prefix cheaply.
-- OpenAI dedupes documents only — Chat Completions has no file-id path for images, so image attachments always re-embed inline.
+- Anthropic dedupes both images and documents this way. Better still, put a file you keep in a conversation on its history message (`Message.user(text, attachments)`): it's then part of the cached prefix on every provider.
+- OpenAI dedupes documents only; image attachments are always sent inline.
 - It's a pure optimization: if the upload call itself fails for any reason, that attempt transparently falls back to full inline embedding rather than failing your request.
 - The other providers (currently Perplexity, NVIDIA, Hugging Face, OpenRouter) have no equivalent mechanism this library can target generically, so attachments to them are re-sent inline on every call.
 

@@ -18,6 +18,7 @@ import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
 import io.github.manishpateluk.llmrouter.model.Attachment;
 import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
+import io.github.manishpateluk.llmrouter.model.Message;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
 import io.github.manishpateluk.llmrouter.model.Role;
@@ -32,24 +33,26 @@ import com.openai.core.JsonValue;
 import com.openai.core.http.StreamResponse;
 import com.openai.errors.OpenAIServiceException;
 import com.openai.errors.OpenAIIoException;
-import com.openai.helpers.ChatCompletionAccumulator;
-import com.openai.models.FunctionDefinition;
-import com.openai.models.FunctionParameters;
+import com.openai.helpers.ResponseAccumulator;
+import com.openai.models.Reasoning;
 import com.openai.models.ReasoningEffort;
-import com.openai.models.ResponseFormatJsonSchema;
-import com.openai.models.chat.completions.ChatCompletion;
-import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
-import com.openai.models.chat.completions.ChatCompletionChunk;
-import com.openai.models.chat.completions.ChatCompletionContentPart;
-import com.openai.models.chat.completions.ChatCompletionContentPartImage;
-import com.openai.models.chat.completions.ChatCompletionCreateParams;
-import com.openai.models.chat.completions.ChatCompletionFunctionTool;
-import com.openai.models.chat.completions.ChatCompletionMessage;
-import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
-import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
-import com.openai.models.chat.completions.ChatCompletionStreamOptions;
-import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
-import com.openai.models.completions.CompletionUsage;
+import com.openai.models.responses.EasyInputMessage;
+import com.openai.models.responses.FunctionTool;
+import com.openai.models.responses.ResponseCreateParams;
+import com.openai.models.responses.ResponseFormatTextJsonSchemaConfig;
+import com.openai.models.responses.ResponseFunctionCallOutputItem;
+import com.openai.models.responses.ResponseFunctionToolCall;
+import com.openai.models.responses.ResponseInputContent;
+import com.openai.models.responses.ResponseInputFile;
+import com.openai.models.responses.ResponseInputImage;
+import com.openai.models.responses.ResponseInputItem;
+import com.openai.models.responses.ResponseInputText;
+import com.openai.models.responses.ResponseInputTextContent;
+import com.openai.models.responses.ResponseOutputItem;
+import com.openai.models.responses.ResponseOutputMessage;
+import com.openai.models.responses.ResponseStreamEvent;
+import com.openai.models.responses.ResponseTextConfig;
+import com.openai.models.responses.ResponseUsage;
 import com.openai.models.embeddings.CreateEmbeddingResponse;
 import com.openai.models.embeddings.Embedding;
 import com.openai.models.embeddings.EmbeddingCreateParams;
@@ -60,23 +63,37 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * {@link ProviderAdapter} for OpenAI, built on the official {@code openai-java} SDK.
- * {@link #sendAsync} uses the SDK's own {@code client.async()} view, which is genuinely
- * non-blocking — not the interface's thread-pool fallback.
+ * {@link ProviderAdapter} for OpenAI, built on the official {@code openai-java} SDK and OpenAI's
+ * Responses API ({@code /v1/responses}). Chat Completions refuses function tools on GPT-6 models
+ * whenever reasoning is on, so an agent step there could only run with reasoning off; the
+ * Responses API takes both. {@link #sendAsync} uses the SDK's own {@code client.async()} view,
+ * which is genuinely non-blocking — not the interface's thread-pool fallback.
  *
- * <p>Known scope limits (documented rather than silently guessed at): a history turn is sent
- * using native {@code tool_calls}/a {@code tool}-role message only when the caller populated
+ * <p>Every request is stateless: it carries the whole conversation, sets {@code store: false} so
+ * OpenAI keeps no copy of the response (as with Chat Completions), and never uses
+ * {@code previous_response_id}. The model's reasoning items aren't sent back on later steps, since
+ * {@code Message} has nowhere to keep them; the model reasons afresh on each step, as it did over
+ * Chat Completions.
+ *
+ * <p>Prompt caching (§4.3): unless {@code RouterConfig.promptCaching} is off, the last block of the
+ * last user message or tool result in the history carries an explicit
+ * {@code prompt_cache_breakpoint}, so the next call of a tool loop — which repeats that history and
+ * changes only the prompt — reads the whole conversation from the cache. OpenAI's own implicit
+ * breakpoint, at the end of each request, still covers a call with no history. An assistant text
+ * turn can't carry a breakpoint (its content isn't an input block), so a history ending in one is
+ * marked at the turn before it.
+ *
+ * <p>Known scope limits (documented rather than silently guessed at): a history turn is sent as
+ * native {@code function_call}/{@code function_call_output} items only when the caller populated
  * {@code Message.toolCalls}/{@code toolCallId} (§3); without those, a {@code TOOL}-role history
  * entry falls back to a plain user-role message instead. {@code Response.generatedFiles} is left
- * empty, since nothing in a plain chat-completions request causes the model to produce a file.
+ * empty, since no built-in tool that produces files is ever requested.
  *
  * <p>Repeated-attachment optimization — documents only, not images: a non-image attachment is
  * opportunistically uploaded once via OpenAI's Files API ({@code purpose=user_data}) and
  * referenced by file id on every subsequent call whose attachment has byte-identical content,
- * instead of re-embedding and re-transmitting the same base64 payload on every turn. The Chat
- * Completions API has no equivalent for images — {@code image_url} only ever accepts a URL or an
- * inline data URI, never a file id — so image attachments always re-embed inline exactly as
- * before; this is a real capability gap in the API, not an oversight here. The upload cache is
+ * instead of re-embedding and re-transmitting the same base64 payload on every turn. Image
+ * attachments are always sent inline as a data URI. The upload cache is
  * keyed by a content hash ({@code mediaType} + bytes) and scoped to this adapter instance, never
  * shared across providers or instances. It's a pure optimization, never a correctness dependency:
  * an upload failure (network blip, permissions, size limits) falls back to full inline embedding
@@ -90,6 +107,7 @@ public final class OpenAiAdapter implements ProviderAdapter {
     private static final Logger log = LoggerFactory.getLogger(OpenAiAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final JsonValue CACHE_BREAKPOINT = JsonValue.from(Map.of("mode", "explicit"));
 
     private final OpenAIClient client;
     private final Map<String, String> uploadedFileIdsByContentHash = new ConcurrentHashMap<>();
@@ -149,14 +167,13 @@ public final class OpenAiAdapter implements ProviderAdapter {
     @Override
     public Response send(String model, Request adaptedRequest) {
         requireAvailable();
-        ChatCompletion completion = client.chat().completions().create(toParams(model, adaptedRequest));
-        return fromCompletion(completion);
+        return fromResponse(client.responses().create(toParams(model, adaptedRequest)));
     }
 
     @Override
     public CompletableFuture<Response> sendAsync(String model, Request adaptedRequest) {
         requireAvailable();
-        return client.async().chat().completions().create(toParams(model, adaptedRequest)).thenApply(this::fromCompletion);
+        return client.async().responses().create(toParams(model, adaptedRequest)).thenApply(this::fromResponse);
     }
 
     /** OpenAI's small, inexpensive embedding model (1536 dimensions by default). */
@@ -194,27 +211,26 @@ public final class OpenAiAdapter implements ProviderAdapter {
     }
 
     /**
-     * Streams chat completion chunks, accumulating them into the same {@link ChatCompletion}
-     * {@link #send} would return; asks for usage in the final chunk so token counts (and so cost)
-     * are still reported.
+     * Streams response events, passing on each text delta and accumulating them into the same
+     * response {@link #send} would return; the final {@code response.completed} event carries the
+     * usage, so token counts (and so cost) are still reported.
      */
     @Override
     public Response sendStreaming(String model, Request adaptedRequest, Consumer<String> onText) {
         requireAvailable();
-        ChatCompletionCreateParams params = toParams(model, adaptedRequest).toBuilder()
-                .streamOptions(ChatCompletionStreamOptions.builder().includeUsage(true).build())
-                .build();
-        ChatCompletionAccumulator accumulator = ChatCompletionAccumulator.create();
-        try (StreamResponse<ChatCompletionChunk> stream = client.chat().completions().createStreaming(params)) {
-            stream.stream().forEach(chunk -> {
-                accumulator.accumulate(chunk);
-                chunk.choices().stream().findFirst()
-                        .flatMap(choice -> choice.delta().content())
-                        .filter(text -> !text.isEmpty())
-                        .ifPresent(onText);
+        ResponseAccumulator accumulator = ResponseAccumulator.create();
+        try (StreamResponse<ResponseStreamEvent> stream = client.responses().createStreaming(toParams(model, adaptedRequest))) {
+            stream.stream().forEach(event -> {
+                accumulator.accumulate(event);
+                if (event.isOutputTextDelta()) {
+                    String text = event.asOutputTextDelta().delta();
+                    if (!text.isEmpty()) {
+                        onText.accept(text);
+                    }
+                }
             });
         }
-        return fromCompletion(accumulator.chatCompletion());
+        return fromResponse(accumulator.response());
     }
 
     private void requireAvailable() {
@@ -223,12 +239,11 @@ public final class OpenAiAdapter implements ProviderAdapter {
         }
     }
 
-    private ChatCompletionCreateParams toParams(String model, Request request) {
-        // max_completion_tokens, not the deprecated max_tokens: reasoning models (GPT-6, o-series)
-        // reject max_tokens with a 400, while every current chat model accepts max_completion_tokens.
-        ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
+    private ResponseCreateParams toParams(String model, Request request) {
+        ResponseCreateParams.Builder builder = ResponseCreateParams.builder()
                 .model(model)
-                .maxCompletionTokens(resolveMaxTokens(model, request));
+                .maxOutputTokens(resolveMaxTokens(model, request))
+                .store(false);
 
         if (request.getTemperature() != null) {
             builder.temperature(request.getTemperature());
@@ -237,46 +252,40 @@ public final class OpenAiAdapter implements ProviderAdapter {
             builder.topP(request.getTopP());
         }
         if (request.getReasoningEffort() != null) {
-            builder.reasoningEffort(ReasoningEffort.of(request.getReasoningEffort()));
+            builder.reasoning(Reasoning.builder().effort(ReasoningEffort.of(request.getReasoningEffort())).build());
         }
 
         String system = buildSystemInstructions(request);
         if (system != null) {
-            builder.addSystemMessage(system);
+            builder.instructions(system);
         }
 
-        for (var message : request.getHistory()) {
+        boolean caching = request.getConfig() == null || request.getConfig().isPromptCaching();
+        List<Message> history = request.getHistory();
+        int breakpoint = caching ? cacheBreakpointIndex(history) : -1;
+        List<ResponseInputItem> input = new ArrayList<>();
+        for (int i = 0; i < history.size(); i++) {
+            Message message = history.get(i);
             switch (message.getRole()) {
-                case USER -> builder.addUserMessage(message.getContent());
-                case ASSISTANT -> addAssistantMessage(builder, message);
-                case SYSTEM -> { /* folded into system instructions above */ }
-                case TOOL -> addToolResultMessage(builder, message);
+                case USER -> input.add(userMessage(message.getContent(), message.getAttachments(), i == breakpoint));
+                case ASSISTANT -> addAssistantMessage(input, message);
+                case SYSTEM -> { /* folded into the instructions above */ }
+                case TOOL -> input.add(toolResult(message, i == breakpoint));
             }
         }
-
-        if (request.getAttachments().isEmpty()) {
-            builder.addUserMessage(request.getPrompt());
-        } else {
-            List<ChatCompletionContentPart> parts = new ArrayList<>();
-            for (Attachment attachment : request.getAttachments()) {
-                parts.add(toContentPart(attachment));
-            }
-            parts.add(ChatCompletionContentPart.ofText(
-                    com.openai.models.chat.completions.ChatCompletionContentPartText.builder()
-                            .text(request.getPrompt())
-                            .build()));
-            builder.addUserMessageOfArrayOfContentParts(parts);
-        }
+        input.add(userMessage(request.getPrompt(), request.getAttachments(), false));
+        builder.inputOfResponse(input);
 
         for (ToolDefinition tool : request.getTools()) {
             builder.addTool(toOpenAiTool(tool));
         }
 
         if (request.getResponseSchema() != null) {
-            builder.responseFormat(ResponseFormatJsonSchema.builder()
-                    .jsonSchema(ResponseFormatJsonSchema.JsonSchema.builder()
+            builder.text(ResponseTextConfig.builder()
+                    .format(ResponseFormatTextJsonSchemaConfig.builder()
                             .name("response")
                             .schema(toJsonSchema(request.getResponseSchema()))
+                            .strict(false)
                             .build())
                     .build());
         }
@@ -284,45 +293,79 @@ public final class OpenAiAdapter implements ProviderAdapter {
         return builder.build();
     }
 
-    /**
-     * Sends {@code message} as a native assistant turn carrying one OpenAI function tool call
-     * per requested call. Falls back to a plain assistant text message when {@code toolCalls} is
-     * empty (the common, no-tool-call case).
-     */
-    private static void addAssistantMessage(ChatCompletionCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message) {
-        if (message.getToolCalls().isEmpty()) {
-            builder.addAssistantMessage(message.getContent());
-            return;
+    /** The history message that carries the cache breakpoint: the last user message or tool result, or -1. */
+    private static int cacheBreakpointIndex(List<Message> history) {
+        for (int i = history.size() - 1; i >= 0; i--) {
+            Role role = history.get(i).getRole();
+            if (role == Role.USER || role == Role.TOOL) {
+                return i;
+            }
         }
-
-        ChatCompletionAssistantMessageParam.Builder assistant =
-                ChatCompletionAssistantMessageParam.builder().content(message.getContent());
-        for (ToolCall call : message.getToolCalls()) {
-            assistant.addToolCall(ChatCompletionMessageFunctionToolCall.builder()
-                    .id(call.getId())
-                    .function(ChatCompletionMessageFunctionToolCall.Function.builder()
-                            .name(call.getName())
-                            .arguments(toArgumentsJson(call.getArguments()))
-                            .build())
-                    .build());
-        }
-        builder.addMessage(assistant.build());
+        return -1;
     }
 
     /**
-     * Sends {@code message} as a native {@code tool}-role message when it carries a {@code
-     * toolCallId}; otherwise falls back to a plain flattened user message, exactly as before this
-     * correlation support existed.
+     * A user turn: plain text, or its attachments then its text as content parts. A turn carrying
+     * the cache breakpoint is always sent as content parts, the breakpoint on its text.
      */
-    private static void addToolResultMessage(ChatCompletionCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message) {
-        if (message.getToolCallId() == null) {
-            builder.addUserMessage("Tool result: " + message.getContent());
-            return;
+    private ResponseInputItem userMessage(String text, List<Attachment> attachments, boolean breakpoint) {
+        EasyInputMessage.Builder message = EasyInputMessage.builder().role(EasyInputMessage.Role.USER);
+        if (attachments.isEmpty() && !breakpoint) {
+            return ResponseInputItem.ofEasyInputMessage(message.content(text).build());
         }
-        builder.addMessage(ChatCompletionToolMessageParam.builder()
-                .toolCallId(message.getToolCallId())
-                .content(message.getContent())
-                .build());
+        List<ResponseInputContent> parts = new ArrayList<>();
+        for (Attachment attachment : attachments) {
+            parts.add(toContentPart(attachment));
+        }
+        ResponseInputText.Builder textPart = ResponseInputText.builder().text(text);
+        if (breakpoint) {
+            textPart.putAdditionalProperty("prompt_cache_breakpoint", CACHE_BREAKPOINT);
+        }
+        parts.add(ResponseInputContent.ofInputText(textPart.build()));
+        return ResponseInputItem.ofEasyInputMessage(message.contentOfResponseInputMessageContentList(parts).build());
+    }
+
+    /**
+     * An assistant turn: its text, then one native {@code function_call} item per requested call.
+     * A turn that only called tools sends no empty text message.
+     */
+    private static void addAssistantMessage(List<ResponseInputItem> input, Message message) {
+        if (message.getToolCalls().isEmpty() || (message.getContent() != null && !message.getContent().isEmpty())) {
+            input.add(ResponseInputItem.ofEasyInputMessage(EasyInputMessage.builder()
+                    .role(EasyInputMessage.Role.ASSISTANT)
+                    .content(message.getContent())
+                    .build()));
+        }
+        for (ToolCall call : message.getToolCalls()) {
+            input.add(ResponseInputItem.ofFunctionCall(ResponseFunctionToolCall.builder()
+                    .callId(call.getId())
+                    .name(call.getName())
+                    .arguments(toArgumentsJson(call.getArguments()))
+                    .build()));
+        }
+    }
+
+    /**
+     * A native {@code function_call_output} item when the message carries a {@code toolCallId};
+     * otherwise a plain flattened user message, exactly as before this correlation support existed.
+     * A result carrying the cache breakpoint sends its output as one text block holding it.
+     */
+    private ResponseInputItem toolResult(Message message, boolean breakpoint) {
+        if (message.getToolCallId() == null) {
+            return userMessage("Tool result: " + message.getContent(), List.of(), breakpoint);
+        }
+        ResponseInputItem.FunctionCallOutput.Builder result = ResponseInputItem.FunctionCallOutput.builder()
+                .callId(message.getToolCallId());
+        if (breakpoint) {
+            result.outputOfResponseFunctionCallOutputItemList(List.of(ResponseFunctionCallOutputItem.ofInputText(
+                    ResponseInputTextContent.builder()
+                            .text(message.getContent())
+                            .putAdditionalProperty("prompt_cache_breakpoint", CACHE_BREAKPOINT)
+                            .build())));
+        } else {
+            result.output(message.getContent());
+        }
+        return ResponseInputItem.ofFunctionCallOutput(result.build());
     }
 
     private static String toArgumentsJson(Map<String, Object> arguments) {
@@ -358,74 +401,68 @@ public final class OpenAiAdapter implements ProviderAdapter {
         return request.getMaxOutputTokens() == null ? modelMax : Math.min(modelMax, request.getMaxOutputTokens());
     }
 
-    private static ChatCompletionFunctionTool toOpenAiTool(ToolDefinition tool) {
-        return ChatCompletionFunctionTool.builder()
-                .function(FunctionDefinition.builder()
-                        .name(tool.getName())
-                        .description(tool.getDescription())
-                        .parameters(toFunctionParameters(tool.getParameters()))
-                        .build())
+    /**
+     * The tool as given, with {@code strict: false}: the Responses API makes function tools strict
+     * unless told otherwise, and strict mode would need {@code additionalProperties: false} and
+     * every property required — the same reason {@link #toJsonSchema} isn't strict.
+     */
+    private static FunctionTool toOpenAiTool(ToolDefinition tool) {
+        FunctionTool.Parameters.Builder parameters = FunctionTool.Parameters.builder();
+        if (tool.getParameters() != null) {
+            for (Map.Entry<String, Object> entry : tool.getParameters().entrySet()) {
+                parameters.putAdditionalProperty(entry.getKey(), JsonValue.from(entry.getValue()));
+            }
+        }
+        return FunctionTool.builder()
+                .name(tool.getName())
+                .description(tool.getDescription())
+                .parameters(parameters.build())
+                .strict(false)
                 .build();
     }
 
-    private static FunctionParameters toFunctionParameters(Map<String, Object> parameters) {
-        FunctionParameters.Builder builder = FunctionParameters.builder();
-        if (parameters != null) {
-            for (Map.Entry<String, Object> entry : parameters.entrySet()) {
-                builder.putAdditionalProperty(entry.getKey(), JsonValue.from(entry.getValue()));
-            }
-        }
-        return builder.build();
-    }
-
     /**
-     * The schema as given. It's sent without {@code strict}, so OpenAI accepts any JSON schema —
+     * The schema as given. It's sent with {@code strict: false}, so OpenAI accepts any JSON schema —
      * strict mode would also need {@code additionalProperties: false} on every object and every
      * property in {@code required}, and making optional properties required would change what the
      * caller asked for.
      */
-    private static ResponseFormatJsonSchema.JsonSchema.Schema toJsonSchema(Map<String, Object> responseSchema) {
-        ResponseFormatJsonSchema.JsonSchema.Schema.Builder builder = ResponseFormatJsonSchema.JsonSchema.Schema.builder();
+    private static ResponseFormatTextJsonSchemaConfig.Schema toJsonSchema(Map<String, Object> responseSchema) {
+        ResponseFormatTextJsonSchemaConfig.Schema.Builder builder = ResponseFormatTextJsonSchemaConfig.Schema.builder();
         for (Map.Entry<String, Object> entry : responseSchema.entrySet()) {
             builder.putAdditionalProperty(entry.getKey(), JsonValue.from(entry.getValue()));
         }
         return builder.build();
     }
 
-    private ChatCompletionContentPart toContentPart(Attachment attachment) {
+    private ResponseInputContent toContentPart(Attachment attachment) {
         String mediaType = attachment.getMediaType();
         if (mediaType != null && mediaType.startsWith("image/")) {
-            // No file-reference path exists for images in Chat Completions — always inline. See class javadoc.
             String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
-            return ChatCompletionContentPart.ofImageUrl(ChatCompletionContentPartImage.builder()
-                    .imageUrl(ChatCompletionContentPartImage.ImageUrl.builder()
-                            .url("data:" + mediaType + ";base64," + base64Data)
-                            .build())
+            return ResponseInputContent.ofInputImage(ResponseInputImage.builder()
+                    .detail(ResponseInputImage.Detail.AUTO)
+                    .imageUrl("data:" + mediaType + ";base64," + base64Data)
                     .build());
         }
 
         if (!"application/pdf".equals(ModelEntry.normalizeMediaType(mediaType))) {
-            // Chat Completions file parts take PDFs only; the router drops anything else for table models (§4).
-            throw new IllegalArgumentException("OpenAI Chat Completions accepts PDF documents only, not " + mediaType);
+            // The capability table lists PDFs only for OpenAI; the router drops anything else for table models (§4).
+            throw new IllegalArgumentException("OpenAI accepts PDF documents only, not " + mediaType);
         }
         String filename = attachment.getFilename() == null ? "attachment" : attachment.getFilename();
         String fileId = uploadOrReuseFileId(attachment);
         if (fileId != null) {
-            return ChatCompletionContentPart.ofFile(ChatCompletionContentPart.File.builder()
-                    .file(ChatCompletionContentPart.File.FileObject.builder()
-                            .fileId(fileId)
-                            .filename(filename)
-                            .build())
+            return ResponseInputContent.ofInputFile(ResponseInputFile.builder()
+                    .fileId(fileId)
+                    .filename(filename)
                     .build());
         }
 
         // Files API upload unavailable or failed for this attempt — fall back to full inline embedding.
         String base64Data = Base64.getEncoder().encodeToString(attachment.getData());
-        return ChatCompletionContentPart.ofFile(ChatCompletionContentPart.File.builder()
-                .file(ChatCompletionContentPart.File.FileObject.builder()
-                        .fileData("data:" + mediaType + ";base64," + base64Data)
-                        .filename(filename)
-                        .build())
+        return ResponseInputContent.ofInputFile(ResponseInputFile.builder()
+                .fileData("data:" + mediaType + ";base64," + base64Data)
+                .filename(filename)
                 .build());
     }
 
@@ -464,53 +501,62 @@ public final class OpenAiAdapter implements ProviderAdapter {
         }
     }
 
-    private Response fromCompletion(ChatCompletion completion) {
-        ChatCompletionMessage message = completion.choices().get(0).message();
-
+    /** The text of every output message, in order, and every function call; reasoning items are skipped. */
+    private Response fromResponse(com.openai.models.responses.Response response) {
+        StringBuilder content = new StringBuilder();
         List<ToolCall> toolCalls = new ArrayList<>();
-        message.toolCalls().ifPresent(calls -> {
-            for (ChatCompletionMessageToolCall call : calls) {
-                if (call.isFunction()) {
-                    toolCalls.add(toToolCall(call.asFunction()));
+        for (ResponseOutputItem item : response.output()) {
+            if (item.isMessage()) {
+                for (ResponseOutputMessage.Content part : item.asMessage().content()) {
+                    if (part.isOutputText()) {
+                        content.append(part.asOutputText().text());
+                    }
                 }
+            } else if (item.isFunctionCall()) {
+                toolCalls.add(toToolCall(item.asFunctionCall()));
             }
-        });
+        }
 
         int inputTokens = 0;
         int outputTokens = 0;
         int reasoningTokens = 0;
         int cacheReadTokens = 0;
-        if (completion.usage().isPresent()) {
-            CompletionUsage usage = completion.usage().get();
-            inputTokens = (int) usage.promptTokens();
-            outputTokens = (int) usage.completionTokens();
-            reasoningTokens = (int) usage.completionTokensDetails()
-                    .flatMap(CompletionUsage.CompletionTokensDetails::reasoningTokens).orElse(0L).longValue();
-            cacheReadTokens = (int) usage.promptTokensDetails()
-                    .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens).orElse(0L).longValue();
+        int cacheWriteTokens = 0;
+        if (response.usage().isPresent()) {
+            ResponseUsage usage = response.usage().get();
+            inputTokens = (int) usage.inputTokens();
+            outputTokens = (int) usage.outputTokens();
+            // The details are optional on the wire; read them leniently rather than through the throwing getters.
+            reasoningTokens = usage._outputTokensDetails().asKnown()
+                    .flatMap(details -> details._reasoningTokens().asKnown()).orElse(0L).intValue();
+            cacheReadTokens = usage._inputTokensDetails().asKnown()
+                    .flatMap(details -> details._cachedTokens().asKnown()).orElse(0L).intValue();
+            cacheWriteTokens = usage._inputTokensDetails().asKnown()
+                    .flatMap(details -> details._cacheWriteTokens().asKnown()).orElse(0L).intValue();
         }
 
         return Response.builder()
-                .content(message.content().orElse(""))
+                .content(content.toString())
                 .toolCalls(toolCalls)
                 .usage(io.github.manishpateluk.llmrouter.model.Usage.builder()
                         .inputTokens(inputTokens)
                         .outputTokens(outputTokens)
                         .reasoningTokens(reasoningTokens)
                         .cacheReadTokens(cacheReadTokens)
+                        .cacheWriteTokens(cacheWriteTokens)
                         .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                         .build())
-                .original(completion)
+                .original(response)
                 .build();
     }
 
     @SuppressWarnings("unchecked")
-    private static ToolCall toToolCall(ChatCompletionMessageFunctionToolCall call) {
-        Map<String, Object> arguments = (Map<String, Object>) call.function().arguments(Map.class);
+    private static ToolCall toToolCall(ResponseFunctionToolCall call) {
+        String arguments = call.arguments();
         return ToolCall.builder()
-                .id(call.id())
-                .name(call.function().name())
-                .arguments(arguments)
+                .id(call.callId())
+                .name(call.name())
+                .arguments(arguments.isBlank() ? Map.of() : (Map<String, Object>) JSON.readValue(arguments, Map.class))
                 .build();
     }
 }

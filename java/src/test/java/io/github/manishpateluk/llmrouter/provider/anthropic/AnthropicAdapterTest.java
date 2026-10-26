@@ -323,7 +323,9 @@ class AnthropicAdapterTest {
 
         MessageParam toolTurn = captor.getValue().messages().get(0);
         assertThat(toolTurn.role()).isEqualTo(com.anthropic.models.messages.MessageParam.Role.USER);
-        assertThat(toolTurn.content().asString()).isEqualTo("Tool result: legacy result");
+        // the conversation's last turn, so it carries the cache marker and goes as a text block
+        assertThat(toolTurn.content().asBlockParams()).singleElement()
+                .satisfies(block -> assertThat(block.asText().text()).isEqualTo("Tool result: legacy result"));
     }
 
     @Test

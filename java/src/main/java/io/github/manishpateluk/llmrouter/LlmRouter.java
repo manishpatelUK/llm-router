@@ -46,6 +46,7 @@ import io.github.manishpateluk.llmrouter.model.EmbeddingResponse;
 import io.github.manishpateluk.llmrouter.model.Message;
 import io.github.manishpateluk.llmrouter.model.Request;
 import io.github.manishpateluk.llmrouter.model.Response;
+import io.github.manishpateluk.llmrouter.model.Role;
 import io.github.manishpateluk.llmrouter.model.ToolDefinitionValidator;
 import io.github.manishpateluk.llmrouter.model.Usage;
 import io.github.manishpateluk.llmrouter.negotiation.CapabilityNegotiator;
@@ -959,7 +960,7 @@ public final class LlmRouter {
                 .filter(feature -> switch (feature) {
                     case TOOLS -> !request.getTools().isEmpty();
                     case RESPONSE_SCHEMA -> request.getResponseSchema() != null;
-                    case ATTACHMENTS -> !request.getAttachments().isEmpty();
+                    case ATTACHMENTS -> request.hasAttachments();
                 })
                 .toList();
     }
@@ -1020,19 +1021,31 @@ public final class LlmRouter {
                 .reasoning(negotiation.getReasoning())
                 .build();
 
-        log.info("Served by {}/{} at thinking level {} ({} input ({} cached), {} output tokens, {} cent(s) estimated)",
+        log.info("Served by {}/{} at thinking level {} ({} input ({} read from cache, {} written to it), {} output tokens, "
+                        + "{} cent(s) estimated)",
                 candidate.getProvider(), candidate.getModel(), resolved.thinkingLevel(), usage.getInputTokens(),
-                usage.getCacheReadTokens(), usage.getOutputTokens(), usage.getEstimatedCostUsdCents());
+                usage.getCacheReadTokens(), usage.getCacheWriteTokens(), usage.getOutputTokens(), usage.getEstimatedCostUsdCents());
         return response;
     }
 
-    /** Prices {@code usage} against {@code model}'s row, charging cached input at the cache rates (§7.1). */
+    /**
+     * Prices {@code usage} against {@code model}'s row (§7.1): cached input at the cache rates, cache
+     * writes at the rate for their lifetime, and the whole call at the long-context rates when its
+     * input is over the row's threshold.
+     */
     static double estimateCostUsd(ModelEntry model, Usage usage) {
-        int uncachedInput = Math.max(0, usage.getInputTokens() - usage.getCacheReadTokens() - usage.getCacheWriteTokens());
+        int cacheWrites = usage.getCacheWriteTokens();
+        int longTtlWrites = Math.min(Math.max(0, usage.getCacheWriteLongTtlTokens()), cacheWrites);
+        int uncachedInput = Math.max(0, usage.getInputTokens() - usage.getCacheReadTokens() - cacheWrites);
         double inputCost = (uncachedInput / 1_000_000.0) * model.getInputCostPerMillionTokens()
                 + (usage.getCacheReadTokens() / 1_000_000.0) * model.effectiveCacheReadCostPerMillionTokens()
-                + (usage.getCacheWriteTokens() / 1_000_000.0) * model.effectiveCacheWriteCostPerMillionTokens();
+                + ((cacheWrites - longTtlWrites) / 1_000_000.0) * model.effectiveCacheWriteCostPerMillionTokens()
+                + (longTtlWrites / 1_000_000.0) * model.effectiveCacheWriteLongTtlCostPerMillionTokens();
         double outputCost = (usage.getOutputTokens() / 1_000_000.0) * model.getOutputCostPerMillionTokens();
+        if (model.isLongContext(usage.getInputTokens())) {
+            inputCost *= model.effectiveLongContextInputMultiplier();
+            outputCost *= model.effectiveLongContextOutputMultiplier();
+        }
         return inputCost + outputCost;
     }
 
@@ -1131,9 +1144,21 @@ public final class LlmRouter {
             }
             requirePositive(cooldown.getDuration(), "RouterConfig.cooldown.duration");
         }
+        if (config.getPromptCacheTtl() == null) {
+            throw new InvalidConfigException("RouterConfig.promptCacheTtl must not be null");
+        }
         if (request.getMaxOutputTokens() != null && request.getMaxOutputTokens() <= 0) {
             throw new IllegalArgumentException("Request.maxOutputTokens must be positive when set, was "
                     + request.getMaxOutputTokens());
+        }
+        for (Message message : request.getHistory()) {
+            if (message.getAttachments() == null) {
+                throw new IllegalArgumentException("Message.attachments must not be null");
+            }
+            if (!message.getAttachments().isEmpty() && message.getRole() != Role.USER) {
+                throw new IllegalArgumentException("Only USER history messages can carry attachments, not "
+                        + message.getRole());
+            }
         }
         List<String> toolProblems = ToolDefinitionValidator.validate(request.getTools());
         if (!toolProblems.isEmpty()) {

@@ -15,9 +15,14 @@ import lombok.extern.jackson.Jacksonized;
  * into a plain text turn. Both default to "absent" ({@code toolCalls} empty, {@code toolCallId}
  * {@code null}), which keeps every existing caller's behavior — and the flattened wire
  * representation — unchanged.
+ *
+ * <p>{@code attachments} (on a {@code USER} message only) are files that turn showed the model.
+ * Adapters send them in that message, before its text, on every later call, so they become part of
+ * the request's cacheable prefix instead of riding along with the latest prompt (§4.3). They are
+ * negotiated like {@code Request.attachments} (§4): one the model can't take is dropped.
  */
 @Value
-@Builder
+@Builder(toBuilder = true)
 @Jacksonized
 public class Message {
 
@@ -29,8 +34,21 @@ public class Message {
 
     String toolCallId;
 
+    /** Files shown with this {@code USER} turn — see the class-level doc. Empty on every other role. */
+    @Builder.Default
+    List<Attachment> attachments = List.of();
+
     public static Message user(String content) {
         return Message.builder().role(Role.USER).content(content).build();
+    }
+
+    /** A user turn that shows the model {@code attachments} — see the class-level doc. */
+    public static Message user(String content, List<Attachment> attachments) {
+        return Message.builder()
+                .role(Role.USER)
+                .content(content)
+                .attachments(attachments == null ? List.of() : List.copyOf(attachments))
+                .build();
     }
 
     public static Message assistant(String content) {

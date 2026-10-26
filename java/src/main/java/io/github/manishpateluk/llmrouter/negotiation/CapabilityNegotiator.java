@@ -99,11 +99,34 @@ public final class CapabilityNegotiator {
         }
 
         List<DroppedAttachment> droppedAttachments = new ArrayList<>();
-        if (!request.getAttachments().isEmpty()) {
-            List<Attachment> kept = keptAttachments(request.getAttachments(), model, droppedAttachments);
+        if (request.hasAttachments()) {
+            // Positions in request.everyAttachment(): the history's attachments in order, then the prompt's.
+            boolean[] kept = keptAttachments(request.everyAttachment(), model, droppedAttachments);
             if (!droppedAttachments.isEmpty()) {
                 droppedFeatures.add("attachments");
-                adapted.attachments(kept);
+                int position = 0;
+                List<io.github.manishpateluk.llmrouter.model.Message> history = new ArrayList<>();
+                for (io.github.manishpateluk.llmrouter.model.Message message : request.getHistory()) {
+                    if (message.getAttachments().isEmpty()) {
+                        history.add(message);
+                        continue;
+                    }
+                    List<Attachment> keptHere = new ArrayList<>();
+                    for (Attachment attachment : message.getAttachments()) {
+                        if (kept[position++]) {
+                            keptHere.add(attachment);
+                        }
+                    }
+                    history.add(message.toBuilder().attachments(List.copyOf(keptHere)).build());
+                }
+                List<Attachment> keptWithPrompt = new ArrayList<>();
+                for (Attachment attachment : request.getAttachments()) {
+                    if (kept[position++]) {
+                        keptWithPrompt.add(attachment);
+                    }
+                }
+                adapted.history(List.copyOf(history));
+                adapted.attachments(List.copyOf(keptWithPrompt));
             }
         }
 
@@ -232,13 +255,13 @@ public final class CapabilityNegotiator {
     }
 
     /**
-     * The attachments {@code model} can take, in order, adding one {@link DroppedAttachment} per
+     * Which of {@code attachments} {@code model} can take, by position, adding one {@link DroppedAttachment} per
      * other attachment to {@code dropped}: a media type it doesn't accept, an image beyond its
      * per-request image limit, or a PDF over its byte or page limit. Page limits apply only when
      * the PDF's page count can be read.
      */
-    private static List<Attachment> keptAttachments(List<Attachment> attachments, ModelEntry model, List<DroppedAttachment> dropped) {
-        List<Attachment> kept = new ArrayList<>();
+    private static boolean[] keptAttachments(List<Attachment> attachments, ModelEntry model, List<DroppedAttachment> dropped) {
+        boolean[] kept = new boolean[attachments.size()];
         int images = 0;
         for (int i = 0; i < attachments.size(); i++) {
             Attachment attachment = attachments.get(i);
@@ -259,7 +282,7 @@ public final class CapabilityNegotiator {
                 }
             }
             if (reason == null) {
-                kept.add(attachment);
+                kept[i] = true;
                 if (mediaType.startsWith("image/")) {
                     images++;
                 }

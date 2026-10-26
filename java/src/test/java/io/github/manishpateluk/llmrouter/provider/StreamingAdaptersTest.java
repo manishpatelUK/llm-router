@@ -120,24 +120,60 @@ class StreamingAdaptersTest {
     }
 
     @Test
-    void openAiStreamsChunksAndRequestsUsageInTheFinalChunk() {
-        String chunk = "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-6-astra\",\"choices\":%s%s}";
+    void openAiStreamsResponseEventsAndReadsUsageFromTheCompletedEvent() {
+        String response = "{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"model\":\"gpt-6-astra\",\"status\":\"%s\","
+                + "\"output\":%s%s}";
+        String message = "[{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"completed\","
+                + "\"content\":[{\"type\":\"output_text\",\"text\":\"Hello there\",\"annotations\":[]}]}]";
+        String delta = "{\"type\":\"response.output_text.delta\",\"sequence_number\":%d,\"item_id\":\"m1\",\"output_index\":0,"
+                + "\"content_index\":0,\"delta\":\"%s\",\"logprobs\":[]}";
         sse = String.join("", List.of(
-                event(chunk.formatted("[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":null}]", "")),
-                event(chunk.formatted("[{\"index\":0,\"delta\":{\"content\":\"lo there\"},\"finish_reason\":null}]", "")),
-                event(chunk.formatted("[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]", "")),
-                event(chunk.formatted("[]", ",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}")),
-                event("[DONE]")));
+                openAiEvent("response.created", "{\"type\":\"response.created\",\"sequence_number\":0,\"response\":"
+                        + response.formatted("in_progress", "[]", "") + "}"),
+                openAiEvent("response.output_text.delta", delta.formatted(1, "Hel")),
+                openAiEvent("response.output_text.delta", delta.formatted(2, "lo there")),
+                openAiEvent("response.completed", "{\"type\":\"response.completed\",\"sequence_number\":3,\"response\":"
+                        + response.formatted("completed", message, ",\"usage\":{\"input_tokens\":7,\"output_tokens\":2,\"total_tokens\":9,"
+                                + "\"input_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":0}}") + "}")));
         OpenAiAdapter adapter = new OpenAiAdapter(OpenAIOkHttpClient.builder().apiKey("test").baseUrl(base + "/v1").build());
         List<String> deltas = new ArrayList<>();
 
-        Response response = adapter.sendStreaming("gpt-6-astra", Request.builder().prompt("Hi").build(), deltas::add);
+        Response result = adapter.sendStreaming("gpt-6-astra", Request.builder().prompt("Hi").build(), deltas::add);
 
         assertThat(deltas).containsExactly("Hel", "lo there");
-        assertThat(response.getContent()).isEqualTo("Hello there");
-        assertThat(response.getUsage().getInputTokens()).isEqualTo(7);
-        assertThat(response.getUsage().getOutputTokens()).isEqualTo(2);
-        assertThat(requestBody.get()).contains("\"stream\":true", "\"include_usage\":true");
+        assertThat(result.getContent()).isEqualTo("Hello there");
+        assertThat(result.getUsage().getInputTokens()).isEqualTo(7);
+        assertThat(result.getUsage().getOutputTokens()).isEqualTo(2);
+        assertThat(result.getUsage().getCacheReadTokens()).isEqualTo(4);
+        assertThat(requestBody.get()).contains("\"stream\":true", "\"store\":false");
+    }
+
+    @Test
+    void openAiStreamsAFunctionCall() {
+        String call = "{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_9\",\"name\":\"lookup\","
+                + "\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\",\"status\":\"completed\"}";
+        sse = String.join("", List.of(
+                openAiEvent("response.output_item.done", "{\"type\":\"response.output_item.done\",\"sequence_number\":0,"
+                        + "\"output_index\":0,\"item\":" + call + "}"),
+                openAiEvent("response.completed", "{\"type\":\"response.completed\",\"sequence_number\":1,\"response\":"
+                        + "{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"model\":\"gpt-6-astra\",\"status\":\"completed\","
+                        + "\"output\":[" + call + "],\"usage\":{\"input_tokens\":7,\"output_tokens\":2,\"total_tokens\":9}}}")));
+        OpenAiAdapter adapter = new OpenAiAdapter(OpenAIOkHttpClient.builder().apiKey("test").baseUrl(base + "/v1").build());
+        List<String> deltas = new ArrayList<>();
+
+        Response result = adapter.sendStreaming("gpt-6-astra", Request.builder().prompt("Weather?")
+                .tools(List.of(ToolDefinition.builder().name("lookup").description("d").parameters(Map.of("type", "object")).build()))
+                .build(), deltas::add);
+
+        assertThat(deltas).isEmpty();
+        assertThat(result.getToolCalls()).singleElement().satisfies(toolCall -> {
+            assertThat(toolCall.getId()).isEqualTo("call_9");
+            assertThat(toolCall.getArguments()).containsEntry("city", "Paris");
+        });
+    }
+
+    private static String openAiEvent(String name, String data) {
+        return "event: " + name + "\ndata: " + data + "\n\n";
     }
 
     // ---- OpenAI-compatible HTTP adapter (NVIDIA, Hugging Face, OpenRouter) ----

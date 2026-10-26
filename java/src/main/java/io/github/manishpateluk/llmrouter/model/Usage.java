@@ -30,9 +30,16 @@ public class Usage {
 
     /**
      * The part of {@code inputTokens} written to the provider's prompt cache on this call (§4.3).
-     * Only providers that bill cache writes separately report it (Anthropic, at a premium); 0 otherwise.
+     * Only providers that bill cache writes separately report it (Anthropic and OpenAI, at a premium); 0 otherwise.
      */
     int cacheWriteTokens;
+
+    /**
+     * The part of {@code cacheWriteTokens} written with the provider's longer cache lifetime
+     * ({@code RouterConfig.promptCacheTtl} {@code LONG}: Anthropic's one hour), which costs more
+     * (§4.3, §7.1); 0 otherwise.
+     */
+    int cacheWriteLongTtlTokens;
 
     /**
      * Estimated cost in US cents (not dollars) — integral cents avoid floating-point drift.

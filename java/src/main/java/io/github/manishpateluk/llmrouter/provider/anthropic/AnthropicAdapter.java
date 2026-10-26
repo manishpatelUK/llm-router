@@ -52,6 +52,7 @@ import com.anthropic.models.messages.ToolUseBlock;
 import com.anthropic.models.messages.ToolUseBlockParam;
 import io.github.manishpateluk.llmrouter.capability.ModelCapabilityTable;
 import io.github.manishpateluk.llmrouter.capability.ModelEntry;
+import io.github.manishpateluk.llmrouter.config.PromptCacheTtl;
 import io.github.manishpateluk.llmrouter.config.StructuredOutputStrategy;
 import io.github.manishpateluk.llmrouter.model.Attachment;
 import io.github.manishpateluk.llmrouter.model.Request;
@@ -100,12 +101,13 @@ import org.slf4j.LoggerFactory;
  * but worth knowing for a long-lived, high-attachment-cardinality server process.
  *
  * <p>Prompt caching (§4.3): unless {@code RouterConfig.promptCaching} is off, the request carries
- * at most two {@code cache_control} breakpoints, well inside Anthropic's limit of four. The first
- * ends the part that repeats across calls: the system instructions, or the last tool definition
- * when there are none. The second ends the conversation when there's history, so the next turn
- * reads everything so far from the cache; without history it ends the attachments, if any. A
- * prefix shorter than the model's minimum (1,024 tokens or more, depending on the model) simply
- * isn't cached. Cache writes cost 1.25 times the input price and reads a tenth of it.
+ * up to four {@code cache_control} breakpoints, Anthropic's limit, in prefix order: the last tool
+ * definition; the request's system instructions; the history's {@code SYSTEM} turns, sent as a
+ * second system block; and the last block of the last other history message, so the next call
+ * reads the whole conversation so far from the cache. The prompt, which changes every call, is
+ * never marked; without a conversation, the last attachment before it is. A prefix shorter than
+ * the model's minimum simply isn't cached. Markers use the five-minute lifetime, or one hour for
+ * {@code RouterConfig.promptCacheTtl} {@code LONG}; cache prices are in the capability table.
  *
  * <p>Schemas too large for Anthropic's strict grammar: Anthropic compiles a {@code responseSchema}
  * into a grammar and rejects one whose grammar is too large (a 400 {@code invalid_request_error}
@@ -122,6 +124,8 @@ public final class AnthropicAdapter implements ProviderAdapter {
     private static final Logger log = LoggerFactory.getLogger(AnthropicAdapter.class);
     private static final long DEFAULT_MAX_TOKENS = 4096L;
     private static final CacheControlEphemeral CACHE_BREAKPOINT = CacheControlEphemeral.builder().build();
+    private static final CacheControlEphemeral LONG_CACHE_BREAKPOINT =
+            CacheControlEphemeral.builder().ttl(CacheControlEphemeral.Ttl.TTL_1H).build();
     private static final String GRAMMAR_TOO_LARGE = "compiled grammar is too large";
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
@@ -341,46 +345,58 @@ public final class AnthropicAdapter implements ProviderAdapter {
         }
 
         boolean caching = request.getConfig() == null || request.getConfig().isPromptCaching();
-        String system = buildSystemInstructions(request);
-        if (system != null) {
-            TextBlockParam systemBlock = TextBlockParam.builder().text(system).build();
-            builder.systemOfTextBlockParams(List.of(caching ? systemBlock.toBuilder().cacheControl(CACHE_BREAKPOINT).build() : systemBlock));
+        CacheControlEphemeral marker = caching ? cacheMarker(request) : null;
+
+        // Breakpoints two and three: the request's own instructions, then the conversation's SYSTEM turns, each its own block.
+        List<TextBlockParam> systemBlocks = new ArrayList<>();
+        for (String text : systemTexts(request)) {
+            TextBlockParam block = TextBlockParam.builder().text(text).build();
+            systemBlocks.add(marker == null ? block : block.toBuilder().cacheControl(marker).build());
+        }
+        if (!systemBlocks.isEmpty()) {
+            builder.systemOfTextBlockParams(systemBlocks);
         }
 
-        for (var message : request.getHistory()) {
+        // Breakpoint four: the end of the conversation so far, so the next call reads all of it from the cache.
+        List<io.github.manishpateluk.llmrouter.model.Message> history = request.getHistory();
+        int lastTurn = -1;
+        for (int i = 0; i < history.size(); i++) {
+            if (history.get(i).getRole() != Role.SYSTEM) {
+                lastTurn = i;
+            }
+        }
+        for (int i = 0; i < history.size(); i++) {
+            var message = history.get(i);
+            CacheControlEphemeral breakpoint = i == lastTurn ? marker : null;
             switch (message.getRole()) {
-                case USER -> builder.addUserMessage(message.getContent());
-                case ASSISTANT -> addAssistantMessage(builder, message);
-                case SYSTEM -> { /* folded into system instructions above */ }
-                case TOOL -> addToolResultMessage(builder, message);
+                case USER -> addUserMessage(builder, message, breakpoint);
+                case ASSISTANT -> addAssistantMessage(builder, message, breakpoint);
+                case SYSTEM -> { /* sent as a system block above */ }
+                case TOOL -> addToolResultMessage(builder, message, breakpoint);
             }
         }
 
-        // Breakpoint two: the end of the conversation when there's history, else the end of the attachments.
-        boolean cacheConversation = !request.getHistory().isEmpty();
+        // The prompt changes every call, so it's never marked; without a conversation, the attachments before it are.
         List<Attachment> attachments = request.getAttachments();
-        if (attachments.isEmpty() && !(caching && cacheConversation)) {
+        if (attachments.isEmpty()) {
             builder.addUserMessage(request.getPrompt());
         } else {
             List<ContentBlockParam> blocks = new ArrayList<>();
             for (Attachment attachment : attachments) {
                 blocks.add(toContentBlockParam(attachment));
             }
-            blocks.add(ContentBlockParam.ofText(request.getPrompt()));
-            if (caching) {
-                // the prompt when caching the conversation, otherwise the last attachment
-                int breakpoint = cacheConversation ? blocks.size() - 1 : blocks.size() - 2;
-                blocks.set(breakpoint, withCacheBreakpoint(blocks.get(breakpoint)));
+            if (marker != null && lastTurn < 0) {
+                blocks.set(blocks.size() - 1, withCacheBreakpoint(blocks.getLast(), marker));
             }
+            blocks.add(ContentBlockParam.ofText(request.getPrompt()));
             builder.addUserMessageOfBlockParams(blocks);
         }
 
-        // Breakpoint one: the system instructions above, or failing those the last tool (tools come first in the prefix).
+        // Breakpoint one: the tool definitions, which come first in the prefix and change least.
         List<ToolDefinition> tools = request.getTools();
         for (int i = 0; i < tools.size(); i++) {
             Tool tool = toAnthropicTool(tools.get(i));
-            boolean breakpoint = caching && system == null && i == tools.size() - 1;
-            builder.addTool(breakpoint ? tool.toBuilder().cacheControl(CACHE_BREAKPOINT).build() : tool);
+            builder.addTool(marker != null && i == tools.size() - 1 ? tool.toBuilder().cacheControl(marker).build() : tool);
         }
 
         if (request.getResponseSchema() != null || request.getReasoningEffort() != null) {
@@ -401,18 +417,40 @@ public final class AnthropicAdapter implements ProviderAdapter {
     }
 
     /**
+     * Sends a {@code USER} history turn: its attachments, then its text, as content blocks; as plain
+     * text when it has neither attachments nor {@code breakpoint}, exactly as before either existed.
+     */
+    private void addUserMessage(MessageCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message,
+            CacheControlEphemeral breakpoint) {
+        if (message.getAttachments().isEmpty() && breakpoint == null) {
+            builder.addUserMessage(message.getContent());
+            return;
+        }
+        List<ContentBlockParam> blocks = new ArrayList<>();
+        for (Attachment attachment : message.getAttachments()) {
+            blocks.add(toContentBlockParam(attachment));
+        }
+        if (message.getContent() != null && !message.getContent().isBlank() || blocks.isEmpty()) {
+            blocks.add(ContentBlockParam.ofText(message.getContent()));
+        }
+        builder.addUserMessageOfBlockParams(withBreakpointOnLast(blocks, breakpoint));
+    }
+
+    /**
      * Sends {@code message} as a native assistant turn: a text block (if it has non-blank
      * content) followed by one {@code tool_use} block per requested call. Falls back to a plain
-     * assistant text message when {@code toolCalls} is empty (the common, no-tool-call case).
+     * assistant text message when {@code toolCalls} is empty (the common, no-tool-call case) and
+     * there's no {@code breakpoint} to put on it.
      */
-    private static void addAssistantMessage(MessageCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message) {
-        if (message.getToolCalls().isEmpty()) {
+    private static void addAssistantMessage(MessageCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message,
+            CacheControlEphemeral breakpoint) {
+        if (message.getToolCalls().isEmpty() && breakpoint == null) {
             builder.addAssistantMessage(message.getContent());
             return;
         }
 
         List<ContentBlockParam> blocks = new ArrayList<>();
-        if (message.getContent() != null && !message.getContent().isBlank()) {
+        if (message.getContent() != null && !message.getContent().isBlank() || message.getToolCalls().isEmpty()) {
             blocks.add(ContentBlockParam.ofText(message.getContent()));
         }
         for (ToolCall call : message.getToolCalls()) {
@@ -422,7 +460,7 @@ public final class AnthropicAdapter implements ProviderAdapter {
                     .input(toToolUseInput(call.getArguments()))
                     .build()));
         }
-        builder.addAssistantMessageOfBlockParams(blocks);
+        builder.addAssistantMessageOfBlockParams(withBreakpointOnLast(blocks, breakpoint));
     }
 
     /**
@@ -430,15 +468,22 @@ public final class AnthropicAdapter implements ProviderAdapter {
      * Anthropic's own convention — when it carries a {@code toolCallId}; otherwise falls back to
      * a plain flattened user message, exactly as before this correlation support existed.
      */
-    private static void addToolResultMessage(MessageCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message) {
+    private static void addToolResultMessage(MessageCreateParams.Builder builder, io.github.manishpateluk.llmrouter.model.Message message,
+            CacheControlEphemeral breakpoint) {
         if (message.getToolCallId() == null) {
-            builder.addUserMessage("Tool result: " + message.getContent());
+            String text = "Tool result: " + message.getContent();
+            if (breakpoint == null) {
+                builder.addUserMessage(text);
+            } else {
+                builder.addUserMessageOfBlockParams(withBreakpointOnLast(new ArrayList<>(List.of(ContentBlockParam.ofText(text))), breakpoint));
+            }
             return;
         }
-        builder.addUserMessageOfBlockParams(List.of(ContentBlockParam.ofToolResult(ToolResultBlockParam.builder()
-                .toolUseId(message.getToolCallId())
-                .content(message.getContent())
-                .build())));
+        builder.addUserMessageOfBlockParams(withBreakpointOnLast(new ArrayList<>(List.of(ContentBlockParam.ofToolResult(
+                ToolResultBlockParam.builder()
+                        .toolUseId(message.getToolCallId())
+                        .content(message.getContent())
+                        .build()))), breakpoint));
     }
 
     private static ToolUseBlockParam.Input toToolUseInput(Map<String, Object> arguments) {
@@ -451,20 +496,36 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return input.build();
     }
 
-    private static String buildSystemInstructions(Request request) {
-        StringBuilder combined = new StringBuilder();
+    /**
+     * The system prompt as up to two blocks: the request's own instructions, which repeat across a
+     * conversation's calls, then its history's {@code SYSTEM} turns (conversation summaries and the
+     * like), which change more often — so a change to the second leaves the first's cache entry intact.
+     */
+    private static List<String> systemTexts(Request request) {
+        List<String> texts = new ArrayList<>();
         if (request.getSystemInstructions() != null && !request.getSystemInstructions().isBlank()) {
-            combined.append(request.getSystemInstructions());
+            texts.add(request.getSystemInstructions());
         }
+        StringBuilder conversation = new StringBuilder();
         for (var message : request.getHistory()) {
             if (message.getRole() == Role.SYSTEM) {
-                if (combined.length() > 0) {
-                    combined.append("\n\n");
+                if (conversation.length() > 0) {
+                    conversation.append("\n\n");
                 }
-                combined.append(message.getContent());
+                conversation.append(message.getContent());
             }
         }
-        return combined.length() == 0 ? null : combined.toString();
+        if (conversation.length() > 0) {
+            texts.add(conversation.toString());
+        }
+        return texts;
+    }
+
+    /** The cache marker for {@code request}: Anthropic's default five minutes, or an hour for {@code PromptCacheTtl.LONG}. */
+    private static CacheControlEphemeral cacheMarker(Request request) {
+        return request.getConfig() != null && request.getConfig().getPromptCacheTtl() == PromptCacheTtl.LONG
+                ? LONG_CACHE_BREAKPOINT
+                : CACHE_BREAKPOINT;
     }
 
     /** The model's maximum output, or the request's {@code maxOutputTokens} when that's lower. */
@@ -521,16 +582,30 @@ public final class AnthropicAdapter implements ProviderAdapter {
         return schema.build();
     }
 
-    /** {@code block} with a prompt-cache breakpoint on it; only text, image and document blocks carry one here. */
-    private static ContentBlockParam withCacheBreakpoint(ContentBlockParam block) {
+    /** {@code blocks}, with {@code breakpoint} on the last one; unchanged when it's {@code null}. */
+    private static List<ContentBlockParam> withBreakpointOnLast(List<ContentBlockParam> blocks, CacheControlEphemeral breakpoint) {
+        if (breakpoint != null && !blocks.isEmpty()) {
+            blocks.set(blocks.size() - 1, withCacheBreakpoint(blocks.getLast(), breakpoint));
+        }
+        return blocks;
+    }
+
+    /** {@code block} with a prompt-cache breakpoint on it: text, image, document, {@code tool_use} or {@code tool_result}. */
+    private static ContentBlockParam withCacheBreakpoint(ContentBlockParam block, CacheControlEphemeral breakpoint) {
         if (block.isText()) {
-            return ContentBlockParam.ofText(block.asText().toBuilder().cacheControl(CACHE_BREAKPOINT).build());
+            return ContentBlockParam.ofText(block.asText().toBuilder().cacheControl(breakpoint).build());
         }
         if (block.isImage()) {
-            return ContentBlockParam.ofImage(block.asImage().toBuilder().cacheControl(CACHE_BREAKPOINT).build());
+            return ContentBlockParam.ofImage(block.asImage().toBuilder().cacheControl(breakpoint).build());
         }
         if (block.isDocument()) {
-            return ContentBlockParam.ofDocument(block.asDocument().toBuilder().cacheControl(CACHE_BREAKPOINT).build());
+            return ContentBlockParam.ofDocument(block.asDocument().toBuilder().cacheControl(breakpoint).build());
+        }
+        if (block.isToolUse()) {
+            return ContentBlockParam.ofToolUse(block.asToolUse().toBuilder().cacheControl(breakpoint).build());
+        }
+        if (block.isToolResult()) {
+            return ContentBlockParam.ofToolResult(block.asToolResult().toBuilder().cacheControl(breakpoint).build());
         }
         throw new IllegalArgumentException("No prompt-cache breakpoint for this block: " + block);
     }
@@ -624,6 +699,9 @@ public final class AnthropicAdapter implements ProviderAdapter {
         // Anthropic's input_tokens leaves out cached tokens; Usage.inputTokens counts every input token.
         int cacheRead = (int) message.usage().cacheReadInputTokens().orElse(0L).longValue();
         int cacheWrite = (int) message.usage().cacheCreationInputTokens().orElse(0L).longValue();
+        int cacheWriteLongTtl = (int) message.usage().cacheCreation()
+                .flatMap(creation -> creation._ephemeral1hInputTokens().asKnown())
+                .orElse(0L).longValue();
         return Response.builder()
                 .content(content.toString())
                 .toolCalls(toolCalls)
@@ -633,6 +711,7 @@ public final class AnthropicAdapter implements ProviderAdapter {
                         .reasoningTokens(0) // Anthropic counts thinking in output_tokens without breaking it out
                         .cacheReadTokens(cacheRead)
                         .cacheWriteTokens(cacheWrite)
+                        .cacheWriteLongTtlTokens(cacheWriteLongTtl)
                         .estimatedCostUsdCents(0) // finalized by the router core against the capability table
                         .build())
                 .original(message)

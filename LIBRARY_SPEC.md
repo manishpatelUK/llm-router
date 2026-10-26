@@ -41,10 +41,14 @@ Request {
                                         // present, the adapter sends the turn using the provider's native
                                         // tool-call/tool-result wire format; when absent, it falls back to a plain
                                         // flattened text turn (e.g. "Tool result: " + content) for that entry.
+                                        // attachments? (USER only): files that turn showed the model, sent in that
+                                        // message before its text on every later call, so they're part of the
+                                        // cacheable prefix (§4.3); negotiated like Request.attachments (§4)
   systemInstructions: string?          // optional system/developer prompt
   responseSchema: Schema?              // optional structured-output schema (JSON-Schema-like)
   tools: ToolDefinition[]?             // optional tool/function definitions the model may call
-  attachments: Attachment[]?           // optional files to include with the prompt (documents, images, etc.)
+  attachments: Attachment[]?           // optional files to include with the prompt (documents, images, etc.); files
+                                        // shown earlier in a conversation belong on their history message instead
   config: RouterConfig?                // optional; falls back to the router's default config if omitted
   maxOutputTokens: int?                // optional cap on generated tokens (incl. reasoning tokens); null = the model's
                                         // maxOutputTokens (§7.1); a higher value is lowered to it; must be > 0 when set
@@ -114,6 +118,7 @@ Response {
     reasoningTokens: int               // the part of outputTokens spent on reasoning, where reported; else 0
     cacheReadTokens: int               // the part of inputTokens read from the provider's prompt cache (§4.3); else 0
     cacheWriteTokens: int              // the part of inputTokens written to the prompt cache, where billed separately (§4.3); else 0
+    cacheWriteLongTtlTokens: int       // the part of cacheWriteTokens written with the longer lifetime (promptCacheTtl "long"); else 0
     estimatedCostUsd: int              // converted to cents to avoid floating point issues
     estimatedCostUsdMicros: int        // the same estimate in millionths of a dollar; whole cents round most
                                         // small calls to 0, so sum this one when tracking spend across calls
@@ -148,7 +153,8 @@ AttemptRecord {
 }
 
 DroppedAttachment {
-  index: int                           // position in Request.attachments
+  index: int                           // position among every attachment: history messages' in order, then
+                                        // Request.attachments (so, with none in history, its position in Request.attachments)
   mediaType: string
   filename: string?
   reason: string                       // e.g. "model does not accept application/pdf", "over the model's limit of 100 images per request"
@@ -182,7 +188,7 @@ Before each attempt, the router checks the chosen model's entry in the Model Cap
 | `responseSchema` | Sent natively via provider's structured-output mechanism | Dropped by default (`droppedFeatures` records it). Optionally, implementations may offer a `structuredOutputStrategy` on `RouterConfig`: `"native"` (fail/drop if unsupported), `"promptFallback"` (inject schema + "respond with JSON only" instructions into the system prompt and best-effort parse the result), or `"auto"` (native when available, prompt-fallback otherwise). Default is `"auto"`. |
 | `tools` | Sent natively via provider's tool-calling mechanism | Dropped, recorded in `droppedFeatures`. No prompt-based faking of tool calls — this is unreliable enough that dropping is the safe default. |
 | `history` | Mapped to provider's message format | N/A — all supported providers accept multi-turn history |
-| `attachments` | Sent natively via the provider's image/document input mechanism. Each attachment is checked individually against `ModelEntry.inputMediaTypes` (§7.1; matching ignores case and parameters, and reads `image/jpg` as `image/jpeg`), and against the model's published limits: images beyond `maxImagesPerRequest`, and PDFs over `maxPdfBytes` or `maxPdfPages` (pages are counted from the PDF's page objects; a page limit applies only when the count can be read). | Only the attachments the model can't take are dropped; the rest are still sent. `droppedFeatures` records `"attachments"` once, and `Response.droppedAttachments` lists exactly which attachments were left out (by index, media type, filename) and why. |
+| `attachments` | Sent natively via the provider's image/document input mechanism. Each attachment is checked individually against `ModelEntry.inputMediaTypes` (§7.1; matching ignores case and parameters, and reads `image/jpg` as `image/jpeg`), and against the model's published limits: images beyond `maxImagesPerRequest`, and PDFs over `maxPdfBytes` or `maxPdfPages` (pages are counted from the PDF's page objects; a page limit applies only when the count can be read). | Attachments on history messages (§3) are checked the same way, together with the prompt's: the image limit counts the whole request. Only the attachments the model can't take are dropped; the rest are still sent. `droppedFeatures` records `"attachments"` once, and `Response.droppedAttachments` lists exactly which attachments were left out (by index, media type, filename) and why. |
 | `temperature` (`RouterConfig.temperature`) | Sent natively as the model's sampling-temperature parameter | Omitted from the outgoing request (not sent — the provider's own default applies), recorded in `droppedFeatures` |
 | `topP` (`RouterConfig.topP`) | Sent natively as the model's nucleus-sampling (top-p) parameter | Omitted from the outgoing request (not sent — the provider's own default applies), recorded in `droppedFeatures` |
 
@@ -256,14 +262,20 @@ Contract:
 
 Providers bill input tokens they've seen recently at a discount, when the request starts with the same content (the "prefix") as an earlier one. Agent loops and multi-turn conversations resend their system instructions, tool definitions and history every turn, so caching that prefix saves most of the input cost. With `RouterConfig.promptCaching` on (the default), the adapter does whatever its provider needs to cache the parts of a request that repeat across calls:
 
-- **Providers that cache on their own** (OpenAI, and most OpenAI-compatible providers) need nothing. `promptCaching: false` can't turn their caching off.
-- **Providers that need marking** (Anthropic) get cache breakpoints. The prefix order is tools, then system instructions, then messages. The adapter marks the end of the part that repeats across calls (the system instructions, or the last tool definition when there are none), and then:
-  - with history, the end of the request, so the next turn reads the whole conversation so far from the cache;
-  - without history, the end of the attachments, if any.
+Every provider caches only a prefix that a later request repeats byte for byte, so what the caller sends matters as much as what the adapter does. A caller gets the most from the cache when each call **appends** to the previous one: the same system instructions and tools, the same history with new turns added at the end, and anything that changes from call to call (a reminder, a note, a varying instruction) in the `prompt`, which no later call repeats. Content that changes the system instructions (a timestamp, a per-request id) or edits earlier history makes everything after it a miss. `SYSTEM` history turns are part of the system prompt on every provider, so they are for conversation-level material (a summary of earlier turns, per-conversation context), not per-call notes.
 
-  That's at most two breakpoints, within Anthropic's limit of four. A prefix shorter than the model's minimum isn't cached, and costs nothing extra. Writing to the cache costs more than plain input (1.25× on Anthropic), and reading costs much less (0.1×), so caching pays for itself from the first reuse.
+- **OpenAI** caches on its own, but only up to its one implicit breakpoint, at the end of each request: in a tool loop that entry ends with the step's prompt, which the next step doesn't repeat, so only the first call's prefix would be read back. Unless `promptCaching` is off, the OpenAI adapter therefore puts one explicit `prompt_cache_breakpoint: {"mode": "explicit"}` on the last block of the last USER or TOOL history message (an assistant text turn can't carry one, so a history ending in one is marked at the turn before it), sending that message's text as a one-block list. The prompt is never marked. OpenAI bills cache writes (from GPT-5.6) and reports them; the adapter reads them into `cacheWriteTokens`.
+- **Providers that cache on their own** (Perplexity and most OpenAI-compatible providers) need no markers. `promptCaching: false` can't turn their caching off.
+- **Providers that need marking** (Anthropic) get cache breakpoints, up to Anthropic's limit of four, in prefix order (tools, then system, then messages):
+  1. the last tool definition;
+  2. the request's `systemInstructions`, sent as the first system block;
+  3. the history's `SYSTEM` turns, sent as a second system block, so a change to them (a new conversation summary) leaves the instructions' cache entry intact;
+  4. the last block of the last non-`SYSTEM` history message — text, image, document, `tool_use` or `tool_result` — so the next call reads the whole conversation so far from the cache.
 
-With `promptCaching: false`, nothing is marked. Either way, `Usage.cacheReadTokens` and `cacheWriteTokens` report what the provider says it cached, and the cost estimate prices them at the cache rates (§7.1).
+  The `prompt` is never marked when there's a conversation: it changes every call, so caching it would only pay the write premium. Without one, the last attachment sent with the prompt is marked instead. A prefix shorter than the model's minimum isn't cached and costs nothing extra.
+- **Lifetime.** `RouterConfig.promptCacheTtl` is `default` (Anthropic's five minutes, refreshed by every read) or `long` (Anthropic's hour). Writes cost 1.25× the input price for the default lifetime and 2× for the long one; reads cost a fraction (0.025×–0.1× on Anthropic, by model). Choose `long` only when calls sharing a prefix start more than five minutes apart. Other providers keep their own lifetime.
+
+With `promptCaching: false`, nothing is marked. Either way, `Usage.cacheReadTokens`, `cacheWriteTokens` and `cacheWriteLongTtlTokens` report what the provider says it cached, and the cost estimate prices them at the table's cache rates (§7.1).
 
 ---
 
@@ -288,6 +300,7 @@ RouterConfig {
   retryDelay: duration?             // default 1s — the wait before the first retry, doubled for each one after (§5.5)
   cooldown: CooldownPolicy?         // no default (off) — skip a model on later calls after repeated failures (§5.5)
   promptCaching: boolean?           // default true — mark repeated parts of the request for the provider's prompt cache (§4.3)
+  promptCacheTtl: string?           // "default" | "long"; default "default" — how long the provider keeps what's cached, where the caller can choose (§4.3)
 }
 
 CooldownPolicy {
@@ -474,8 +487,12 @@ ModelEntry {
   model: string                 // provider-defined model id, §12.2 — not a library-level enum
   inputCostPerMillionTokens: float
   outputCostPerMillionTokens: float
-  cacheReadCostPerMillionTokens: float?   // input read from the prompt cache (§4.3); null = the provider's usual rate (below)
-  cacheWriteCostPerMillionTokens: float?  // input written to the prompt cache; null = the provider's usual rate (below)
+  cacheReadCostPerMillionTokens: float?   // input read from the prompt cache (§4.3); the input price when there's no discount
+  cacheWriteCostPerMillionTokens: float?  // input written to the prompt cache with the default lifetime; null = not billed apart from input
+  cacheWriteLongTtlCostPerMillionTokens: float?  // input written with the longer lifetime (promptCacheTtl "long")
+  longContextThresholdTokens: int?        // input size above which the whole call is billed at long-context rates; null = one rate card
+  longContextInputMultiplier: float?      // multiplies every input price (plain, cache reads, cache writes) above the threshold
+  longContextOutputMultiplier: float?     // multiplies the output price above the threshold
   thinkingScore: number        // 0-10, relative reasoning/capability strength within this table
   speedScore: number           // 0-10, relative latency/throughput (higher = faster)
   contextWindowTokens: int
@@ -495,7 +512,7 @@ ModelEntry {
 }
 ```
 
-When a row has no cache prices, Anthropic rows use Anthropic's published rates for every model, 0.1× the input price for reads and 1.25× for writes (its default five-minute cache). Other providers' discounts vary by model, so their rows use the full input price until the table gives a cache price. That overstates the cost of a cached call rather than understating it.
+Calls are priced after the fact from their `Usage`: plain input at the input price, cache reads and writes at the cache prices (long-lifetime writes at theirs), output at the output price; and when the call's input (cached or not) is over `longContextThresholdTokens`, the input and output parts are multiplied by the long-context multipliers (Claude Haiku 5.5 over 100,000 tokens: 5× and 5×; GPT-6 over 272,000: 2× and 1.5×). The seed table states every chat row's cache prices; a provider without a cache discount has `cacheReadCostPerMillionTokens` equal to its input price. For a row without them (one registered by a caller), Anthropic rows fall back to 0.1× the input price for reads, 1.25× for writes and 2× for long-lifetime writes, and other providers to the full input price.
 
 `supportsVision` and `supportsFileInput` are no longer stored; implementations keep them readable for compatibility, derived from `inputMediaTypes` (any `image/*` type; any other type). A row registered the older way, with those two booleans and no `inputMediaTypes`, keeps their old meaning: any `image/*` when `supportsVision`, any other type when `supportsFileInput`.
 
@@ -546,7 +563,7 @@ EmbeddingModelEntry {
 
 `thinkingLevel` always chooses the model (§7.2). With `RouterConfig.sendThinkingLevel: true`, it also reaches the provider, through the chosen model's own reasoning control (`ModelEntry.reasoningControl`). The default is `false`, which leaves every model on its provider's default reasoning, so existing callers see no change.
 
-- **`effort`** — the model takes a named effort (Anthropic `output_config.effort`, OpenAI and most OpenAI-compatible providers `reasoning_effort`, OpenRouter and Perplexity's Agent API `reasoning.effort`). `low`, `medium` and `high` map to the model's level of the same name in `reasoningEffortLevels`, or the nearest by position when it has none (`low` → the lowest, `medium` → the middle, `high` → the second-highest); `max` always maps to the model's **highest** level (e.g. `xhigh` or `max`).
+- **`effort`** — the model takes a named effort (Anthropic `output_config.effort`, most OpenAI-compatible providers `reasoning_effort`, OpenAI's Responses API, OpenRouter and Perplexity's Agent API `reasoning.effort`). `low`, `medium` and `high` map to the model's level of the same name in `reasoningEffortLevels`, or the nearest by position when it has none (`low` → the lowest, `medium` → the middle, `high` → the second-highest); `max` always maps to the model's **highest** level (e.g. `xhigh` or `max`).
 - **`budget`** — the model takes a thinking-token budget (Anthropic `thinking.budget_tokens` on models before Claude 4.6). `low` sends none (no extended thinking, the provider default); `medium`, `high` and `max` send 4,096, 16,384 and 32,768 tokens. The budget is capped at half the attempt's output limit (the model's `maxOutputTokens`, or `Request.maxOutputTokens` when lower), so the budget is always below `max_tokens` and the answer keeps room; if that cap is below 1,024 tokens (Anthropic's minimum), no budget is sent. Sending a budget also drops `temperature`/`topP` for the attempt (§4). OpenRouter sends a budget as `reasoning.max_tokens`; providers with no budget convention (including Perplexity) send none.
 - **`none`** — nothing is sent; the level only chooses the model.
 
@@ -598,7 +615,7 @@ Provider adapters are responsible only for translating the unified `Request`/`Re
 
 #### 8.1.1 Attachment reuse across calls (optional adapter-internal optimization)
 
-`Request.attachments` is per-call, and `Message` (history) carries no attachment reference — a caller running a multi-turn conversation that keeps the same file relevant across several calls has no protocol-level way to say "this attachment hasn't changed since last time." Rather than growing the public `Request`/`Message` shape to express that (which would force every attachment-bearing history entry to carry provider-agnostic file identity, and raise awkward questions about replaying history against a provider that never saw the file, serializing/rehydrating that identity across process restarts, etc.), an adapter **may** solve this transparently, entirely on its own side of the `ProviderAdapter` boundary, when the underlying provider exposes a suitable mechanism (a file-upload API whose returned handle can be referenced from a later request instead of re-embedding the content, and/or an explicit prompt-caching hint on repeated content). Doing so is invisible to callers: they keep passing the same `Attachment` (same bytes) on `Request.attachments` every call, exactly as documented in §3, and get the optimization for free as long as they reuse the same adapter/router instance across the conversation — which the library already expects (§1, §6: construct once, reuse for the process lifetime).
+A caller that keeps a file in a conversation should put it on the history message that showed it (`Message.attachments`, §3), where it's part of the cacheable prefix. Either way — on a history message, or passed again on `Request.attachments` every call — the bytes are sent again on every call, and an adapter **may** avoid re-sending them transparently, entirely on its own side of the `ProviderAdapter` boundary, when the underlying provider exposes a suitable mechanism (a file-upload API whose returned handle can be referenced from a later request instead of re-embedding the content, and/or an explicit prompt-caching hint on repeated content). Doing so is invisible to callers: they keep passing the same `Attachment` (same bytes) on `Request.attachments` every call, exactly as documented in §3, and get the optimization for free as long as they reuse the same adapter/router instance across the conversation — which the library already expects (§1, §6: construct once, reuse for the process lifetime).
 
 An adapter implementing this should:
 - Key reuse off the attachment's **content** (e.g. a hash of `mediaType` + bytes), never off object identity or a caller-supplied name, since two calls may pass distinct `Attachment` instances with identical bytes.
@@ -776,7 +793,7 @@ ProviderTool {
 - **No emulation.** The router never substitutes its own implementation (it doesn't run a search on the caller's behalf). That would break the library's side-effect-free guarantee (§3), for the same reason prompt-based tool faking is ruled out in §4.
 - **Requiring them.** `"providerTools"` joins §12.9, so `requiredFeatures` can make candidates that lack any requested provider tool skip rather than drop, with the same skip/exhaustion semantics as §5.4. A finer-grained form (requiring `webSearch` but tolerating loss of `webFetch`) is deferred until there's a concrete need.
 - **Fallback.** Negotiation stays per attempt. Falling back from a provider that ran a tool to one that can't is handled exactly like any other dropped feature. Fallback never resumes a partly completed provider-side tool run: each attempt is a fresh call.
-- **Adapter prerequisites.** Some providers expose hosted tools only on a different API surface from the one an adapter currently uses (OpenAI's are on the Responses API rather than Chat Completions, for example). Supporting `providerTools` for such a provider means moving that adapter, and until then its table entries simply list no `providerTools`.
+- **Adapter prerequisites.** Some providers expose hosted tools only on a different API surface from the one an adapter currently uses. Supporting `providerTools` for such a provider means moving that adapter, and until then its table entries simply list no `providerTools`. (The OpenAI adapter already calls the Responses API, where OpenAI's hosted tools live.)
 
 ### 13.3 Results in `Response`
 

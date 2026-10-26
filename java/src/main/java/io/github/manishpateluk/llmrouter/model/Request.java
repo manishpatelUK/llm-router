@@ -36,6 +36,7 @@ public class Request {
     @Builder.Default
     List<ToolDefinition> tools = List.of();
 
+    /** Files sent with {@code prompt}. Files shown earlier in the conversation go on their history message instead. */
     @Builder.Default
     List<Attachment> attachments = List.of();
 
@@ -79,4 +80,19 @@ public class Request {
      * intended to be set directly by callers.
      */
     Integer reasoningBudgetTokens;
+
+    /** Every attachment the request carries: those on its history's messages, in order, then {@link #attachments}. */
+    public List<Attachment> everyAttachment() {
+        List<Attachment> every = new java.util.ArrayList<>();
+        for (Message message : history) {
+            every.addAll(message.getAttachments());
+        }
+        every.addAll(attachments);
+        return every;
+    }
+
+    /** Whether {@link #everyAttachment()} is non-empty. */
+    public boolean hasAttachments() {
+        return !attachments.isEmpty() || history.stream().anyMatch(message -> !message.getAttachments().isEmpty());
+    }
 }

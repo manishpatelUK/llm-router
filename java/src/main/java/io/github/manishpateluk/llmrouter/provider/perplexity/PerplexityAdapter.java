@@ -231,7 +231,7 @@ public final class PerplexityAdapter implements ProviderAdapter {
         ArrayNode input = MAPPER.createArrayNode();
         for (Message message : request.getHistory()) {
             switch (message.getRole()) {
-                case USER -> addMessage(input, "user", message.getContent());
+                case USER -> addUserMessage(input, message.getContent(), message.getAttachments());
                 case ASSISTANT -> {
                     if (message.getContent() != null && !message.getContent().isEmpty()) {
                         addMessage(input, "assistant", message.getContent());
@@ -258,19 +258,24 @@ public final class PerplexityAdapter implements ProviderAdapter {
             }
         }
 
-        if (request.getAttachments().isEmpty()) {
-            addMessage(input, "user", request.getPrompt());
-        } else {
-            ObjectNode message = input.addObject();
-            message.put("type", "message");
-            message.put("role", "user");
-            ArrayNode parts = message.putArray("content");
-            parts.addObject().put("type", "input_text").put("text", request.getPrompt());
-            for (Attachment attachment : request.getAttachments()) {
-                parts.add(attachmentPart(attachment));
-            }
-        }
+        addUserMessage(input, request.getPrompt(), request.getAttachments());
         return input;
+    }
+
+    /** A user message: plain text, or its text then its attachments as content parts. */
+    private static void addUserMessage(ArrayNode input, String text, List<Attachment> attachments) {
+        if (attachments.isEmpty()) {
+            addMessage(input, "user", text);
+            return;
+        }
+        ObjectNode message = input.addObject();
+        message.put("type", "message");
+        message.put("role", "user");
+        ArrayNode parts = message.putArray("content");
+        parts.addObject().put("type", "input_text").put("text", text == null ? "" : text);
+        for (Attachment attachment : attachments) {
+            parts.add(attachmentPart(attachment));
+        }
     }
 
     private static void addMessage(ArrayNode input, String role, String content) {

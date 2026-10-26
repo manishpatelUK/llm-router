@@ -64,7 +64,7 @@ public final class RequestEstimator {
      */
     public static int inputTokens(Request request, ModelEntry model) {
         long tokens = textTokens(request);
-        for (Attachment attachment : request.getAttachments()) {
+        for (Attachment attachment : request.everyAttachment()) {
             if (model.supportsMediaType(attachment.getMediaType())) {
                 tokens += attachmentTokens(model.getProvider(), model.getModel(), attachment);
             }

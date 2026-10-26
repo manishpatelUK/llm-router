@@ -3,6 +3,76 @@
 Changes that affect callers of `llm-router`, newest first. Each entry says what changed and what, if
 anything, calling code needs to do. The full behavior is in [`LIBRARY_SPEC.md`](LIBRARY_SPEC.md).
 
+## Java 1.0.14 (unreleased)
+
+### Prompt caching that agent loops actually read back, on every provider
+
+1.0.12's Anthropic markers put the conversation's cache entry on the prompt, which an agent loop
+replaces on every call, so later calls read back only the tools and system instructions and wrote
+the whole conversation to the cache again, at 1.25× the input price, every step.
+
+- **Anthropic: up to four markers, never on the prompt** (`LIBRARY_SPEC.md` §4.3): the last tool,
+  the system instructions, the history's `SYSTEM` turns (now a second system block), and the last
+  block of the last history message (text, image, document, `tool_use` or `tool_result`). The
+  prompt is unmarked whenever there's a conversation. A history ending in a marked message is sent
+  as content blocks rather than a plain string; nothing else about the wire shape changes.
+- **What callers should do** to be read from the cache on every provider: keep each call's
+  system instructions, tools and history the same as the previous call's, adding turns only at the
+  end, and put whatever changes per call in the prompt. llm-agent-loop 1.0.10 does this.
+- **`Message.attachments`** (USER messages only): a file shown earlier in a conversation goes on its
+  history message, so it's cached with the conversation instead of being re-sent with every prompt.
+  Negotiated like `Request.attachments`: `DroppedAttachment.index` now counts history attachments
+  first (unchanged when there are none). Every adapter sends them. New `Message.user(text, attachments)`
+  and `Message.toBuilder()`; `Request.everyAttachment()` and `hasAttachments()` see both kinds.
+  Attachments on any other role are refused with `IllegalArgumentException`.
+- **`RouterConfig.promptCacheTtl`** (`DEFAULT` or `LONG`): `LONG` asks Anthropic for its one-hour
+  cache. New `Usage.cacheWriteLongTtlTokens`, priced at the long-lifetime write rate.
+- **OpenAI cache writes are reported**: GPT-6 bills them, and `Usage.cacheWriteTokens` now carries
+  them, so they're priced at the write rate rather than as plain input.
+
+### OpenAI: the Responses API, so GPT-6 can call tools with reasoning on
+
+The OpenAI adapter called Chat Completions, which refuses function tools on GPT-6 models while
+reasoning is on — and they reason by default — so any request with tools to a GPT-6 model failed
+with a 400, with or without a thinking level. The adapter now calls the Responses API
+(`/v1/responses`), which takes both. Nothing changes for callers: same `OpenAiAdapter`
+constructors, same `Request`/`Response`, same usage fields.
+
+- **Stateless, with no copy kept by OpenAI**: each request carries the whole conversation and sets
+  `store: false` (the Responses API keeps responses by default; Chat Completions didn't).
+  OpenAI's own prefix caching works as before, and cache reads and writes are still reported.
+- **Tools and response schemas are sent with `strict: false`**, as before in effect: the Responses
+  API makes function tools strict by default, which would demand every property be required.
+- **Wire changes**: `instructions` instead of a system message, `max_output_tokens` instead of
+  `max_completion_tokens`, `reasoning.effort` instead of `reasoning_effort`, history tool calls
+  and results as `function_call`/`function_call_output` items. An assistant turn that only called
+  tools no longer sends an empty text message.
+- **An explicit cache breakpoint at the end of the conversation** (`LIBRARY_SPEC.md` §4.3):
+  OpenAI's implicit breakpoint sits at the end of each request, so in a tool loop each step's cache
+  entry ended with that step's prompt and only the first call's prefix was ever read back. The last
+  user message or tool result now carries `prompt_cache_breakpoint`; off with `promptCaching(false)`.
+  Measured on gpt-6-luna, 4 tool steps: reads grew 1,718 → 2,910 → 4,102 tokens instead of staying
+  at 1,716, writes stayed at 1,204 per step instead of growing to 3,588, and the run cost 34% less
+  (the last step 59% less).
+- **Not yet**: the model's reasoning items aren't passed back between tool steps (`ROADMAP.md`).
+
+### Prices
+
+- **Cache prices on every row of the seed table**, from each provider's pricing page: Anthropic's
+  differ by model (reads 0.025× on Fable 5.1, 0.05× on Opus 5.5 and Sonnet 5.5, 0.1× on Haiku 5.5),
+  so cached Opus 5.5 calls were over-estimated 2× before; OpenAI, Perplexity and OpenRouter cached
+  input was priced at the full input rate. A provider with no discount has its input price as the
+  read price.
+- **New table fields** `cacheWriteLongTtlCostPerMillionTokens`, `longContextThresholdTokens`,
+  `longContextInputMultiplier`, `longContextOutputMultiplier` (§7.1): Claude Haiku 5.5 bills prompts
+  over 100,000 tokens at 5×, and GPT-6 over 272,000 tokens at 2× input and 1.5× output; estimates now
+  follow.
+- **Re-priced**: OpenRouter `deepseek/deepseek-v4-pro-0813` ($1.32 / $3.96) and
+  `deepseek/deepseek-v4.1-flash` ($0.02 / $1.00), as OpenRouter now lists them. Every row re-verified
+  on 2026-10-26.
+- **The table-update skill** now requires cache and long-context prices on every row and checks
+  Anthropic's against the live pricing page; a table test fails the build when a row has none.
+
 ## Java 1.0.12 (2026-10-20)
 
 ### Prompt caching, cached and reasoning tokens, usage listener

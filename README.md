@@ -63,7 +63,7 @@ Two more `RouterConfig` settings shape how hard and how far the router tries:
 - `fallback: finish` lets a run step down one thinking level at a time, down to `low`, instead of failing once every model at the requested level has failed. The response says which level actually answered.
 - `sendThinkingLevel: true` sends the thinking level to the chosen model's own reasoning control (an effort level, or a thinking budget), not only uses it to pick the model.
 
-On Anthropic, the router marks the parts of a request that repeat across calls for its prompt cache, so agent loops and conversations pay a tenth of the input price for what they resend. Token usage reports cached and reasoning tokens. A usage listener on the router hears every attempt and call, with tokens, cost and latency, for metrics.
+On Anthropic, the router marks the parts of a request that repeat across calls for its prompt cache (tools, system instructions, the conversation so far, never the changing prompt), so agent loops and conversations pay a fraction of the input price for what they resend; the other providers cache the same repeated prefix on their own. Files kept in a conversation travel on their history message, inside the cached prefix. Token usage reports cached and reasoning tokens. A usage listener on the router hears every attempt and call, with tokens, cost and latency, for metrics.
 
 For resilience, `attemptTimeout` and `callTimeout` bound how long an attempt or a whole call may take, `maxRetries` retries rate limits and server errors on the same model before falling back, and `cooldown` skips a model on later calls for a while after it keeps failing. All are off by default.
 

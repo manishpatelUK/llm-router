@@ -49,10 +49,30 @@ public class ModelEntry {
     Double cacheReadCostPerMillionTokens;
 
     /**
-     * Price of input tokens written to the prompt cache, or {@code null} for the provider's usual
-     * rate — see {@link #effectiveCacheWriteCostPerMillionTokens()} and §7.1.
+     * Price of input tokens written to the prompt cache with the provider's default lifetime, or
+     * {@code null} for the provider's usual rate — see {@link #effectiveCacheWriteCostPerMillionTokens()} and §7.1.
      */
     Double cacheWriteCostPerMillionTokens;
+
+    /**
+     * Price of input tokens written to the prompt cache with the provider's longer lifetime
+     * ({@code PromptCacheTtl.LONG}), or {@code null} for the provider's usual rate — see
+     * {@link #effectiveCacheWriteLongTtlCostPerMillionTokens()} and §7.1.
+     */
+    Double cacheWriteLongTtlCostPerMillionTokens;
+
+    /**
+     * Input size, in tokens, above which the whole call is billed at long-context rates, or
+     * {@code null} when the model has one rate card. A call's input counts every input token,
+     * cached or not.
+     */
+    Integer longContextThresholdTokens;
+
+    /** Multiplies every input price (plain, cache reads, cache writes) above {@link #longContextThresholdTokens}; {@code null} reads as 1. */
+    Double longContextInputMultiplier;
+
+    /** Multiplies the output price above {@link #longContextThresholdTokens}; {@code null} reads as 1. */
+    Double longContextOutputMultiplier;
 
     /** 0-10, relative reasoning/capability strength within this table. */
     double thinkingScore;
@@ -124,8 +144,8 @@ public class ModelEntry {
 
     /**
      * {@link #cacheReadCostPerMillionTokens} when set; otherwise a tenth of the input price for
-     * Anthropic (its published rate for every model) and the full input price for anyone else,
-     * since their cache discounts vary by model (§7.1).
+     * Anthropic (its historical rate; newer models are cheaper, so the table sets theirs) and the full
+     * input price for anyone else, since their cache discounts vary by model (§7.1).
      */
     public double effectiveCacheReadCostPerMillionTokens() {
         if (cacheReadCostPerMillionTokens != null) {
@@ -143,6 +163,33 @@ public class ModelEntry {
             return cacheWriteCostPerMillionTokens;
         }
         return provider == Provider.ANTHROPIC ? inputCostPerMillionTokens * 1.25 : inputCostPerMillionTokens;
+    }
+
+    /**
+     * {@link #cacheWriteLongTtlCostPerMillionTokens} when set; otherwise twice the input price for
+     * Anthropic (its rate for the one-hour cache) and {@link #effectiveCacheWriteCostPerMillionTokens()}
+     * for anyone else (§7.1).
+     */
+    public double effectiveCacheWriteLongTtlCostPerMillionTokens() {
+        if (cacheWriteLongTtlCostPerMillionTokens != null) {
+            return cacheWriteLongTtlCostPerMillionTokens;
+        }
+        return provider == Provider.ANTHROPIC ? inputCostPerMillionTokens * 2 : effectiveCacheWriteCostPerMillionTokens();
+    }
+
+    /** Whether a call with {@code inputTokens} of input is billed at this model's long-context rates. */
+    public boolean isLongContext(int inputTokens) {
+        return longContextThresholdTokens != null && inputTokens > longContextThresholdTokens;
+    }
+
+    /** {@link #longContextInputMultiplier}, with {@code null} read as 1. */
+    public double effectiveLongContextInputMultiplier() {
+        return longContextInputMultiplier == null ? 1 : longContextInputMultiplier;
+    }
+
+    /** {@link #longContextOutputMultiplier}, with {@code null} read as 1. */
+    public double effectiveLongContextOutputMultiplier() {
+        return longContextOutputMultiplier == null ? 1 : longContextOutputMultiplier;
     }
 
     /** {@link #reasoningControl}, with {@code null} read as {@link ReasoningControl#NONE}. */

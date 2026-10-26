@@ -14,7 +14,7 @@ import lombok.extern.jackson.Jacksonized;
  * deliberately not rebuilt per request.
  *
  * <p>{@code thinkingLevel}, {@code costOptimized}, {@code structuredOutputStrategy},
- * {@code requiredFeatures}, {@code fallback}, {@code sendThinkingLevel}, {@code maxRetries}, {@code retryDelay} and {@code promptCaching} always carry their spec-defined default when not explicitly set, so
+ * {@code requiredFeatures}, {@code fallback}, {@code sendThinkingLevel}, {@code maxRetries}, {@code retryDelay}, {@code promptCaching} and {@code promptCacheTtl} always carry their spec-defined default when not explicitly set, so
  * downstream routing code never needs to null-check them. {@code route} is the one field that stays {@code null} by default —
  * unlike the others, "no route given" resolves dynamically from available providers (§5.2)
  * rather than to a fixed value, so a {@code RouterConfig.builder().build()} with no other
@@ -124,4 +124,13 @@ public class RouterConfig {
      */
     @Builder.Default
     boolean promptCaching = true;
+
+    /**
+     * How long the provider keeps what's cached, where the caller can choose (§4.3): {@code DEFAULT}
+     * (Anthropic's five minutes) or {@code LONG} (Anthropic's one hour, whose writes cost 2× the
+     * input price instead of 1.25×). Pick {@code LONG} only when calls sharing a prefix start more
+     * than five minutes apart. Other providers keep their own lifetime, whatever this says.
+     */
+    @Builder.Default
+    PromptCacheTtl promptCacheTtl = PromptCacheTtl.DEFAULT;
 }

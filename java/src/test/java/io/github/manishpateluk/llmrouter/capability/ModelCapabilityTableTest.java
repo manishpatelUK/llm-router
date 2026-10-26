@@ -128,4 +128,27 @@ class ModelCapabilityTableTest {
                 .lastUpdated(Instant.parse("2026-01-01T00:00:00Z"))
                 .build();
     }
+
+    @Test
+    void everyChatRowStatesItsCachePricesConsistently() {
+        for (ModelEntry row : ModelCapabilityTable.listModels()) {
+            String name = row.getProvider() + "/" + row.getModel();
+            assertThat(row.getCacheReadCostPerMillionTokens()).as(name + ": cache read price (the input price when there's no discount)")
+                    .isNotNull();
+            assertThat(row.getCacheReadCostPerMillionTokens()).as(name).isBetween(0.0, row.getInputCostPerMillionTokens());
+            if (row.getProvider() == Provider.ANTHROPIC || row.getProvider() == Provider.OPENAI) {
+                assertThat(row.getCacheWriteCostPerMillionTokens()).as(name + ": write price").isNotNull();
+                assertThat(row.getCacheWriteLongTtlCostPerMillionTokens()).as(name + ": long-lifetime write price").isNotNull();
+                assertThat(row.getCacheWriteLongTtlCostPerMillionTokens()).as(name)
+                        .isGreaterThanOrEqualTo(row.getCacheWriteCostPerMillionTokens());
+            }
+            boolean threshold = row.getLongContextThresholdTokens() != null;
+            assertThat(row.getLongContextInputMultiplier() != null).as(name + ": long-context fields go together").isEqualTo(threshold);
+            assertThat(row.getLongContextOutputMultiplier() != null).as(name + ": long-context fields go together").isEqualTo(threshold);
+            if (threshold) {
+                assertThat(row.getLongContextInputMultiplier()).as(name).isGreaterThanOrEqualTo(1.0);
+                assertThat(row.getLongContextOutputMultiplier()).as(name).isGreaterThanOrEqualTo(1.0);
+            }
+        }
+    }
 }

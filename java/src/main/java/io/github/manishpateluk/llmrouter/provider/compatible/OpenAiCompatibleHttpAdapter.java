@@ -189,26 +189,30 @@ public abstract class OpenAiCompatibleHttpAdapter implements ProviderAdapter {
 
         for (var message : request.getHistory()) {
             switch (message.getRole()) {
-                case USER -> messages.add(simpleMessage("user", message.getContent()));
+                case USER -> messages.add(userMessage(message.getContent(), message.getAttachments()));
                 case ASSISTANT -> messages.add(simpleMessage("assistant", message.getContent()));
                 case SYSTEM -> { /* folded into system instructions above */ }
                 case TOOL -> messages.add(simpleMessage("user", "Tool result: " + message.getContent()));
             }
         }
 
-        List<Attachment> imageAttachments = request.getAttachments().stream()
+        messages.add(userMessage(request.getPrompt(), request.getAttachments()));
+
+        return messages;
+    }
+
+    /** A user message: plain text, or its text, images and (unless switched off) documents as content parts. */
+    @SuppressWarnings("deprecation")
+    private ObjectNode userMessage(String text, List<Attachment> attachments) {
+        List<Attachment> imageAttachments = attachments.stream()
                 .filter(OpenAiCompatibleHttpAdapter::isImage)
                 .toList();
         List<Attachment> documentAttachments = supportsDocumentAttachments()
-                ? request.getAttachments().stream().filter(a -> !isImage(a)).toList()
+                ? attachments.stream().filter(a -> !isImage(a)).toList()
                 : List.of();
-        if (imageAttachments.isEmpty() && documentAttachments.isEmpty()) {
-            messages.add(simpleMessage("user", request.getPrompt()));
-        } else {
-            messages.add(userMessageWithAttachments(request.getPrompt(), imageAttachments, documentAttachments));
-        }
-
-        return messages;
+        return imageAttachments.isEmpty() && documentAttachments.isEmpty()
+                ? simpleMessage("user", text)
+                : userMessageWithAttachments(text, imageAttachments, documentAttachments);
     }
 
     /**
