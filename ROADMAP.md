@@ -62,6 +62,18 @@ far. Remove an item once it ships. Items within a section are roughly in priorit
   Direction: a configurable OpenAI-compatible provider with a base URL and optional key, on the
   existing `OpenAiCompatibleHttpAdapter`. Unknown models get conservative capabilities unless
   registered.
+- **Decision models (Jev and similar).** Models such as TypeSafe AI's Jev don't write text: they
+  pick one of the answers the caller defines and report a probability for each. They're much
+  cheaper and faster than an LLM for yes/no, routing and scoring questions. The router assumes
+  every model writes text: `Request` has nowhere to put the answers, `Response` has nowhere to put
+  the probabilities, and nothing in the table stops a plain text request being routed to such a
+  model. Direction: `Request.choices` (labels, optional descriptions) and `Response.choice` +
+  `choiceScores`, plus a §7.1 capability that marks a model as choice-only. Text requests skip those
+  models. A choices request sent to an LLM goes out as a one-field `enum` `responseSchema` and returns
+  `choice` without scores, so a route of Jev then Haiku falls back cleanly. Needs a new provider id
+  (§12.1), and a per-call price in the table if the provider bills per call rather than per token.
+  Check the real API first: Jev is in early access, and its published speed and cost figures are
+  the vendor's own.
 
 ## Developer experience
 
